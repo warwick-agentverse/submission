@@ -1,0 +1,8 @@
+{
+  "name": "Taximiser (Shubh)",
+  "description": "AI tax adviser and write-off optimiser for sole traders. Ingest bank statements, invoices, receipts, and mileage logs to uncover missed tax reliefs and clarify deductible expenses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
