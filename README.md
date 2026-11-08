@@ -6,6 +6,8 @@ Most UK sole traders, freelancers, and small businesses overpay thousands of pou
 
 **Taximiser** bridges that knowledge gap. Because our AI and deterministic HMRC rule engine possess deeper knowledge of UK tax legislation than an everyday sole trader, the platform continuously analyses bank statements, foreign-currency receipts, invoices, and mileage logs to uncover every legitimate tax relief and deduction the user can take advantage of—maximising their tax savings while producing a compliant, ready-to-file `Form SA103F` return.
 
+### To access Taximiser: https://taximiser.ai.studio/
+### To access synthetic receipt generator, including 3d physics simulation, to test Taximiser https://taximiser-test-function.ai.studio/
 ---
 
 ## Core Workflow
