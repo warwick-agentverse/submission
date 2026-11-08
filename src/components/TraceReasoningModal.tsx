@@ -411,17 +411,17 @@ export const AuditAndBenchmarksModal: React.FC<AuditAndBenchmarksModalProps> = (
       aria-labelledby="audit-modal-title"
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4"
     >
-      <div className="bg-white border border-slate-200 rounded-xl max-w-3xl w-full p-5 space-y-4 shadow-xl max-h-[88vh] flex flex-col">
+      <div className="bg-white border border-slate-200 rounded-xl max-w-5xl w-full p-5 space-y-4 shadow-xl max-h-[92vh] flex flex-col">
         <div className="flex items-start justify-between gap-4 pb-3 border-b border-slate-200">
           <div>
-            <div className="text-xs font-mono uppercase tracking-wider text-slate-500">
-              Reproducible Maths, Benchmarks &amp; Immutable Action Log
+            <div className="text-xs font-mono uppercase tracking-wider text-emerald-700 font-semibold">
+              System Architecture Flowchart · Hard-Coded vs. AI Logic · Benchmarks &amp; Audit Log
             </div>
             <h2
               id="audit-modal-title"
               className="text-base font-bold text-slate-900 mt-0.5"
             >
-              Judge Verification Suite &amp; Audit Trail
+              Decision Tree Flowchart &amp; Judge Verification Suite
             </h2>
           </div>
           <button
@@ -435,6 +435,213 @@ export const AuditAndBenchmarksModal: React.FC<AuditAndBenchmarksModalProps> = (
         </div>
 
         <div className="flex-1 overflow-y-auto space-y-4 pr-1">
+          {/* Section 0: Visual Decision Tree & Architecture Flowchart */}
+          <div
+            data-testid="decision-tree-visual-flowchart"
+            className="p-4 bg-slate-950 text-white rounded-xl border border-slate-800 space-y-3.5 text-xs"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-800">
+              <div>
+                <div className="text-[10px] font-mono uppercase tracking-wider text-emerald-400">
+                  End-to-End Programme Logic &amp; 4-Node HMRC Decision Tree (evaluateExpertDecisionTree)
+                </div>
+                <div className="font-bold text-sm text-white mt-0.5">
+                  Strict Separation: Hard-Coded TypeScript Engine vs. AI Semantic Reasoning vs. Human/CA Gates
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
+                <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-700 font-bold">
+                  [HARD-CODED IN CODE]
+                </span>
+                <span className="px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-700 font-bold">
+                  [AI SEMANTIC LAYER]
+                </span>
+                <span className="px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-700 font-bold">
+                  [HUMAN / CA GATE]
+                </span>
+                <span className="px-2 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-700 font-bold">
+                  [HARD BLOCK £0]
+                </span>
+              </div>
+            </div>
+
+            {/* Stage 0 & Stage 1 Row */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+              <div className="p-3 rounded-lg bg-slate-900 border border-emerald-700/70 space-y-1">
+                <div className="flex items-center justify-between text-[10px] font-mono">
+                  <span className="text-emerald-400 font-bold">STAGE 0 · SECURITY VAULT</span>
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800">
+                    [HARD-CODED]
+                  </span>
+                </div>
+                <div className="font-bold text-white">
+                  CRA Anti-Fraud &amp; Anti-IDOR Ownership Check
+                </div>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  <code>securityEngine.ts</code> verifies Experian/Equifax/TransUnion identity, enforces <code>requestingUserId === ownerUserId</code> (blocks URL tampering with 403), and encrypts chunks with unique <strong>AES-256-GCM DEK + KEK</strong>.
+                </p>
+              </div>
+
+              <div className="p-3 rounded-lg bg-slate-900 border border-indigo-600/80 space-y-1">
+                <div className="flex items-center justify-between text-[10px] font-mono">
+                  <span className="text-indigo-400 font-bold">STAGE 1A · MULTIMODAL OCR</span>
+                  <span className="px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800">
+                    [AI SEMANTIC LAYER]
+                  </span>
+                </div>
+                <div className="font-bold text-white">
+                  Gemini 3.8 Flash Vision + Spreadsheet Parser
+                </div>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Reads photos, PDFs, <code>.xlsx</code> &amp; <code>.csv</code>. Extracts merchant, date, currency (HKD/USD/EUR/GBP), verbatim itemised lines, and proposes semantic category &amp; initial split %. <strong>Never computes tax maths.</strong>
+                </p>
+              </div>
+
+              <div className="p-3 rounded-lg bg-slate-900 border border-emerald-700/70 space-y-1">
+                <div className="flex items-center justify-between text-[10px] font-mono">
+                  <span className="text-emerald-400 font-bold">STAGE 1B · FORENSIC &amp; ERROR GATE</span>
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800">
+                    [HARD-CODED + GATE]
+                  </span>
+                </div>
+                <div className="font-bold text-white">
+                  Live FX, 45p/mi Mileage &amp; Media Error Auditor
+                </div>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Converts FX in code, calculates <code>miles × £0.45</code>, blocks prompt injections/doctored totals (<code>runAdversarialForensics</code>), and flags receipt math errors (<code>∑ lines ≠ total</code> → <strong>Fix Mistake</strong> or <strong>Hold £0 for Issuer</strong>).
+                </p>
+              </div>
+            </div>
+
+            {/* Down Arrow Divider */}
+            <div className="flex items-center justify-center text-emerald-400 font-mono text-[11px]">
+              ▼ Passes Stage 1 Extraction &amp; Forensic Pre-Check → Enters 4-Node HMRC Statutory Decision Tree (`evaluateExpertDecisionTree`) ▼
+            </div>
+
+            {/* Stage 2: 4-Node Decision Tree */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
+              {/* Node 1 */}
+              <div className="p-3 rounded-lg bg-slate-900 border-2 border-emerald-600 space-y-1.5 flex flex-col justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px] font-mono">
+                    <span className="text-emerald-400 font-bold">NODE 1</span>
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300">
+                      [HARD-CODED]
+                    </span>
+                  </div>
+                  <div className="font-bold text-white">
+                    Coded HMRC Block List Gate
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400">
+                    ITTOIA 2005 s.45, s.47, s.54
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    Checks <code>HMRC_CODED_BLOCK_LIST</code>: Client hospitality, gifts &gt;£50, everyday suits, fines, self-payslips.
+                  </p>
+                </div>
+                <div className="pt-1.5 border-t border-slate-800 text-[10px] font-mono space-y-0.5">
+                  <div className="text-rose-400 font-bold">
+                    ├─ Match → HARD FORCE £0 (Overrides 100% user/AI input)
+                  </div>
+                  <div className="text-emerald-400">└─ Pass → Go to Node 2</div>
+                </div>
+              </div>
+
+              {/* Node 2 */}
+              <div className="p-3 rounded-lg bg-slate-900 border-2 border-emerald-600 space-y-1.5 flex flex-col justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px] font-mono">
+                    <span className="text-emerald-400 font-bold">NODE 2</span>
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300">
+                      [HARD-CODED]
+                    </span>
+                  </div>
+                  <div className="font-bold text-white">
+                    Claim Specificity &amp; Vagueness Gate
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400">
+                    TMA 1970 s.12B &amp; BIM37000
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    Checks if merchant/description is &lt;6 chars or generic (<code>&quot;misc&quot;</code>, <code>&quot;cash&quot;</code>, <code>&quot;general&quot;</code>).
+                  </p>
+                </div>
+                <div className="pt-1.5 border-t border-slate-800 text-[10px] font-mono space-y-0.5">
+                  <div className="text-amber-400 font-bold">
+                    ├─ Vague → TOO_VAGUE_CLAIM (Pause &amp; Flag CA)
+                  </div>
+                  <div className="text-emerald-400">└─ Specific → Go to Node 3</div>
+                </div>
+              </div>
+
+              {/* Node 3 */}
+              <div className="p-3 rounded-lg bg-slate-900 border-2 border-amber-500 space-y-1.5 flex flex-col justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px] font-mono">
+                    <span className="text-amber-400 font-bold">NODE 3</span>
+                    <span className="px-1.5 py-0.5 rounded bg-amber-950 text-amber-300">
+                      [AI + HUMAN GATE]
+                    </span>
+                  </div>
+                  <div className="font-bold text-white">
+                    Wholly &amp; Exclusively / Mixed-Use Split
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400">
+                    ITTOIA 2005 s.34 / BIM37605 / BIM47705
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    AI detects dual-use ambiguity (laptops, phone, residence fuel, restaurant bill) &amp; asks targeted question.
+                  </p>
+                </div>
+                <div className="pt-1.5 border-t border-slate-800 text-[10px] font-mono space-y-0.5">
+                  <div className="text-amber-300 font-bold">
+                    ├─ Unsure → Ask User (Work / Split % / Itemised Lines)
+                  </div>
+                  <div className="text-emerald-400">└─ Confirmed % → Go to Node 4</div>
+                </div>
+              </div>
+
+              {/* Node 4 */}
+              <div className="p-3 rounded-lg bg-slate-900 border-2 border-emerald-600 space-y-1.5 flex flex-col justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px] font-mono">
+                    <span className="text-emerald-400 font-bold">NODE 4</span>
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300">
+                      [HARD-CODED]
+                    </span>
+                  </div>
+                  <div className="font-bold text-white">
+                    Evidence Proof &amp; 85% Risk Cap Gate
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400">
+                    TMA 1970 s.12B (5-Yr Proof Retention)
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    If <code>highAuditRisk &amp;&amp; !proofAttached</code> while Strict Cap is ON, code caps claim at <strong>85%</strong>.
+                  </p>
+                </div>
+                <div className="pt-1.5 border-t border-slate-800 text-[10px] font-mono space-y-0.5">
+                  <div className="text-amber-400 font-bold">
+                    ├─ No Proof → Cap at 85% (Log AI vs Code Disagreement)
+                  </div>
+                  <div className="text-emerald-400">└─ Proof Packed → Unlock 100%</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Stage 3 Bottom Bar */}
+            <div className="p-3 rounded-lg bg-emerald-950/60 border border-emerald-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="space-y-0.5">
+                <div className="text-[10px] font-mono uppercase text-emerald-300 font-bold">
+                  STAGE 3 · DETERMINISTIC TAX &amp; NI ENGINE + SECOND BOT AUDIT + SA103F FILING [100% HARD-CODED]
+                </div>
+                <div className="text-[11px] text-slate-200">
+                  Computes <code>Deductible = round(baseGross × effectivePct / 100)</code> · Applies UK Tax + Class 4 NI bands (<code>0% / 26% / 42%</code>) · Generates reproducible <strong>Python (decimal + pandas)</strong> script · Runs <code>runSecondBotVerificationAudit()</code> for CA sign-off · Exports HMRC <strong>Form SA103F</strong>.
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Section 1: Calculator-Reproducible Portfolio Tax Formula */}
           <div className="p-3.5 bg-emerald-50/50 border border-emerald-200 rounded-lg space-y-2 text-xs">
             <div className="flex items-center justify-between font-bold text-emerald-950">

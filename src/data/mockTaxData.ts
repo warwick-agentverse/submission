@@ -514,10 +514,27 @@ export const INGESTION_BATCH_PRESETS: IngestionBatchPreset[] = [
         highAuditRisk: true,
         confidencePercent: 82,
         rawLineSnippet:
-          'ITEMISED_BILL_SCREENSHOT: THE HOXTON GRILL | LINE 1: OWN TRAVEL DINNER £92.50 | LINE 2: CLIENT GUEST STEAK & WINE £92.50 | TOTAL: £185.00',
+          'ITEMISED_BILL_SCREENSHOT: THE HOXTON GRILL | LINE 1: OWN TRAVEL DINNER £82.50 | LINE 2: CLIENT GUEST STEAK & WINE £82.50 | PRINTED TOTAL: £185.00 (SUM MISMATCH +£20)',
         status: 'needs_clarification',
+        mediaError: {
+          hasError: true,
+          errorType: 'ARITHMETIC_MISMATCH',
+          title:
+            'Receipt Math Error: Printed Total (£185) ≠ Line Items Sum (£165)',
+          description:
+            'The itemised lines printed on this receipt sum to £165 (£82.50 + £82.50), but the receipt total was printed as £185 — a £20 billing discrepancy.',
+          claimedAmountGbp: 185,
+          suggestedCorrectedAmountGbp: 165,
+          claimedOriginalAmount: 185,
+          suggestedCorrectedOriginalAmount: 165,
+          originalCurrency: 'GBP',
+          discrepancyGbp: 20,
+          issuerClarificationDraft:
+            'Dear The Hoxton Grill Billing Team,\n\nRegarding receipt "hoxton_itemised_screenshot.png" dated 29 Sep: the printed line items sum to £165.00, whereas the receipt total shows £185.00 (+£20.00 discrepancy). Could you please clarify this £20 difference or issue a corrected VAT receipt for our UK HMRC Self Assessment records?',
+          resolutionStatus: 'unresolved',
+        },
         aiContextNote:
-          'Itemised bill: £92.50 own travel meal + £92.50 guest meal · Client items disallowed',
+          'Itemised bill: £82.50 own travel meal + £82.50 guest meal · Receipt total mismatch (+£20)',
         aiQuestion:
           'Were any itemised restaurant bill lines for a client, or 100% overnight travel subsistence?',
         whatWouldChangeMind:

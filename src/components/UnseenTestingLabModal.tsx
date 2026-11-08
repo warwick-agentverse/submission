@@ -372,7 +372,7 @@ export const UnseenTestingLabModal: React.FC<UnseenTestingLabModalProps> = ({
                 {isProcessingOcr ? 'Running Gemini OCR...' : 'Upload Receipt / CSV'}
                 <input
                   type="file"
-                  accept=".png,.jpg,.jpeg,.webp,.pdf,.csv,.json,.txt"
+                  accept=".xlsx,.xls,.csv,.tsv,.png,.jpg,.jpeg,.webp,.pdf,.json,.txt"
                   className="hidden"
                   disabled={isProcessingOcr}
                   onChange={(e) => {

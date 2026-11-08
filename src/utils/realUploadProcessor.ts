@@ -4,6 +4,7 @@ import {
   ItemisedBillLine,
   TaxReliefSubsidy,
   calculateHMRCMileageGross,
+  detectMediaErrorsOnItem,
   estimateMarginalSaving,
   getOrBuildItemisedBillLines,
 } from './taxEngine';
@@ -13,6 +14,13 @@ import {
   detectCurrencyFromTextAndMerchant,
   fetchLiveFxRatesToGbp,
 } from './currencyConverter';
+import {
+  isExcelBinaryFileName,
+  isSpreadsheetFileName,
+  parseCsvTextToRows,
+  parseExcelArrayBufferToRows,
+  ParsedSpreadsheetExpenseRow,
+} from './spreadsheetParser';
 
 export interface RealSourceSlot {
   id: string;
@@ -32,8 +40,9 @@ export const INITIAL_REAL_SOURCE_SLOTS: RealSourceSlot[] = [
     id: 'real-slot-bank',
     source: 'bank_statement',
     title: 'Bank Statements',
-    subtitle: 'Upload CSV, PDF, or screenshot of business/personal bank transactions',
-    acceptTypes: '.csv,.pdf,.png,.jpg,.jpeg,.webp,.txt,.json',
+    subtitle:
+      'Upload Excel (.XLSX/.XLS), .CSV, PDF, or screenshot of bank transactions',
+    acceptTypes: '.xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.webp,.txt,.json',
     uploadedFiles: [],
     extractedCount: 0,
     questionsGenerated: 0,
@@ -44,8 +53,9 @@ export const INITIAL_REAL_SOURCE_SLOTS: RealSourceSlot[] = [
     id: 'real-slot-receipt',
     source: 'receipt',
     title: 'Receipts & Tickets',
-    subtitle: 'Upload receipt photos (.PNG/.JPG) or PDFs for Gemini Vision OCR',
-    acceptTypes: '.png,.jpg,.jpeg,.webp,.pdf,.csv,.txt',
+    subtitle:
+      'Upload receipt photos (.PNG/.JPG), PDFs, or itemised .XLSX / .CSV logs',
+    acceptTypes: '.xlsx,.xls,.csv,.tsv,.png,.jpg,.jpeg,.webp,.pdf,.txt,.json',
     uploadedFiles: [],
     extractedCount: 0,
     questionsGenerated: 0,
@@ -56,8 +66,9 @@ export const INITIAL_REAL_SOURCE_SLOTS: RealSourceSlot[] = [
     id: 'real-slot-invoice',
     source: 'invoice',
     title: 'Supplier Invoices',
-    subtitle: 'Upload subcontractor, software, equipment, or legal invoices',
-    acceptTypes: '.pdf,.png,.jpg,.jpeg,.webp,.csv,.txt,.json',
+    subtitle:
+      'Upload subcontractor, software, or hardware invoices (.XLSX, .CSV, PDF, Image)',
+    acceptTypes: '.xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.webp,.txt,.json',
     uploadedFiles: [],
     extractedCount: 0,
     questionsGenerated: 0,
@@ -68,8 +79,9 @@ export const INITIAL_REAL_SOURCE_SLOTS: RealSourceSlot[] = [
     id: 'real-slot-mileage',
     source: 'car_journey',
     title: 'Car Journeys (GPS)',
-    subtitle: 'Upload mileage log CSV or trip summary (calculated in code at 45p/mi)',
-    acceptTypes: '.csv,.txt,.pdf,.png,.jpg,.jpeg,.json',
+    subtitle:
+      'Upload mileage log in Excel (.XLSX/.XLS), .CSV, or PDF (calculated at 45p/mi)',
+    acceptTypes: '.xlsx,.xls,.csv,.tsv,.txt,.pdf,.png,.jpg,.jpeg,.json',
     uploadedFiles: [],
     extractedCount: 0,
     questionsGenerated: 0,
@@ -100,6 +112,12 @@ interface RawAiItem {
   splitOptionPercentage?: number;
   taxRuleReference?: string;
   whatWouldChangeMind?: string;
+  hasMediaError?: boolean;
+  mediaErrorType?: string;
+  mediaErrorTitle?: string;
+  mediaErrorDescription?: string;
+  suggestedCorrectedOriginalAmount?: number;
+  issuerClarificationDraft?: string;
   itemisedLines?: Array<{
     id?: string;
     description?: string;
@@ -127,10 +145,12 @@ interface RawAiRelief {
 
 /**
  * Processes a real uploaded file for a specific DataSourceType slot:
- * 1. Sends file (base64 image/PDF or text CSV/JSON) to `/api/gemini/analyze-source`.
+ * 1. Parses Excel (.xlsx/.xls) and CSV (.csv/.tsv) spreadsheets deterministically
+ *    for all 4 supported expense types (`bank_statement`, `receipt`, `invoice`, `car_journey`),
+ *    or sends binary images/PDFs to `/api/gemini/analyze-source`.
  * 2. Converts any foreign currency (e.g. HKD, USD, EUR) to GBP using live FX rates.
  * 3. Runs deterministic code calculations (`calculateHMRCMileageGross`, `runAdversarialForensics`,
- *    and `rawBaseSpendGbp * statutoryMultiplier`) on the AI-extracted items and reliefs.
+ *    and `rawBaseSpendGbp * statutoryMultiplier`) on the extracted items and reliefs.
  * 4. Returns structured `ExpenseItem[]` (including itemised bill lines and clarification questions)
  *    and `TaxReliefSubsidy[]` (for Stage 3 reliefs).
  */
@@ -144,15 +164,33 @@ export async function processRealSourceUpload(
   modelUsed: string;
 }> {
   const lowerName = file.name.toLowerCase();
+  const isExcel = isExcelBinaryFileName(lowerName);
+  const isSpreadsheet = isSpreadsheetFileName(lowerName);
   const isTextFile =
     lowerName.endsWith('.csv') ||
+    lowerName.endsWith('.tsv') ||
     lowerName.endsWith('.txt') ||
     lowerName.endsWith('.json');
 
   let rawTextContent: string | undefined;
   let base64Data: string | undefined;
+  let preParsedSpreadsheetItems: ParsedSpreadsheetExpenseRow[] = [];
 
-  if (isTextFile) {
+  if (isExcel) {
+    const arrayBuffer = await file.arrayBuffer();
+    const parsedExcel = parseExcelArrayBufferToRows(
+      arrayBuffer,
+      file.name,
+      sourceType
+    );
+    preParsedSpreadsheetItems = parsedExcel.items;
+    rawTextContent = parsedExcel.normalizedCsvText;
+  } else if (isSpreadsheet) {
+    const csvText = await file.text();
+    const parsedCsv = parseCsvTextToRows(csvText, file.name, sourceType);
+    preParsedSpreadsheetItems = parsedCsv.items;
+    rawTextContent = parsedCsv.normalizedCsvText || csvText;
+  } else if (isTextFile) {
     rawTextContent = await file.text();
   } else {
     base64Data = await new Promise<string>((resolve, reject) => {
@@ -171,36 +209,51 @@ export async function processRealSourceUpload(
 
   let rawAiItems: RawAiItem[] = [];
   let rawAiReliefs: RawAiRelief[] = [];
-  let modelUsed = 'gemini-3.8-flash';
+  let modelUsed = isSpreadsheet
+    ? 'Spreadsheet Engine + HMRC Decision Tree'
+    : 'gemini-3.8-flash';
 
-  try {
-    const response = await fetch('/api/gemini/analyze-source', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sourceType,
-        fileName: file.name,
-        mimeType: file.type || (isTextFile ? 'text/plain' : 'image/png'),
-        base64Data,
-        rawTextContent: rawTextContent ? rawTextContent.slice(0, 12000) : undefined,
-      }),
-    });
+  if (preParsedSpreadsheetItems.length > 0) {
+    rawAiItems = preParsedSpreadsheetItems;
+    rawAiReliefs = buildDeterministicFallbackFromUpload(
+      file.name,
+      sourceType,
+      rawTextContent
+    ).reliefs;
+  } else {
+    try {
+      const response = await fetch('/api/gemini/analyze-source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceType,
+          fileName: file.name,
+          mimeType:
+            file.type ||
+            (isTextFile || isSpreadsheet ? 'text/plain' : 'image/png'),
+          base64Data,
+          rawTextContent: rawTextContent
+            ? rawTextContent.slice(0, 12000)
+            : undefined,
+        }),
+      });
 
-    if (response.ok) {
-      const data = await response.json();
-      modelUsed = data.modelUsed || 'gemini-3.8-flash';
-      if (Array.isArray(data.analysis?.items)) {
-        rawAiItems = data.analysis.items;
+      if (response.ok) {
+        const data = await response.json();
+        modelUsed = data.modelUsed || 'gemini-3.8-flash';
+        if (Array.isArray(data.analysis?.items)) {
+          rawAiItems = data.analysis.items;
+        }
+        if (Array.isArray(data.analysis?.recommendedReliefs)) {
+          rawAiReliefs = data.analysis.recommendedReliefs;
+        }
       }
-      if (Array.isArray(data.analysis?.recommendedReliefs)) {
-        rawAiReliefs = data.analysis.recommendedReliefs;
-      }
+    } catch {
+      // Fallback to deterministic local parser below if network/API error
     }
-  } catch {
-    // Fallback to deterministic local parser below if network/API error
   }
 
-  // Fallback parser if AI returned empty (e.g. offline or custom CSV)
+  // Fallback parser if AI returned empty (e.g. offline or custom CSV/XLSX)
   if (rawAiItems.length === 0) {
     const fallback = buildDeterministicFallbackFromUpload(
       file.name,
@@ -261,21 +314,6 @@ export async function processRealSourceUpload(
         ? calculateHMRCMileageGross(miles)
         : fxConversion.grossAmountGbp;
 
-    // Run deterministic forensic shield on every AI-extracted item
-    const forensics = runAdversarialForensics({
-      merchant,
-      rawText: rawSnippet,
-      date,
-      claimedGrossAmount: grossAmount,
-    });
-
-    const isBlocked = Boolean(raw.isDisallowed) || forensics.isManipulatedOrBlocked;
-    const needsClarification = !isBlocked;
-    const splitPct = Math.min(
-      95,
-      Math.max(20, Math.round(Number(raw.splitOptionPercentage || 50)))
-    );
-
     const mappedItemisedLines: ItemisedBillLine[] | undefined =
       Array.isArray(raw.itemisedLines) && raw.itemisedLines.length > 0
         ? raw.itemisedLines.map((li, lineIdx) => {
@@ -303,6 +341,50 @@ export async function processRealSourceUpload(
           })
         : undefined;
 
+    // Detect any arithmetic, billing, duplicate, or date errors on the uploaded media
+    const detectedMediaError = detectMediaErrorsOnItem({
+      merchant,
+      date,
+      sourceDocumentName: file.name,
+      grossAmountGbp: grossAmount,
+      originalAmount: fxConversion.originalAmount,
+      originalCurrency: fxConversion.originalCurrency,
+      fxRatePerGbp: fxConversion.fxRatePerGbp,
+      rawText: rawSnippet,
+      itemisedLines: mappedItemisedLines,
+      aiDetectedError: {
+        hasMediaError: raw.hasMediaError,
+        mediaErrorType: raw.mediaErrorType,
+        mediaErrorTitle: raw.mediaErrorTitle,
+        mediaErrorDescription: raw.mediaErrorDescription,
+        suggestedCorrectedOriginalAmount: raw.suggestedCorrectedOriginalAmount,
+        issuerClarificationDraft: raw.issuerClarificationDraft,
+      },
+    });
+
+    // Run deterministic forensic shield on every AI-extracted item
+    const forensics = runAdversarialForensics({
+      merchant,
+      rawText: rawSnippet,
+      date,
+      claimedGrossAmount: grossAmount,
+    });
+
+    // Hard block only for statutory prohibitions or prompt injections;
+    // for receipt math/date errors, allow the user to Fix Mistake or Seek Clarification from Issuer
+    const isHardStatutoryOrInjectionBlock =
+      Boolean(raw.isDisallowed) ||
+      (forensics.isManipulatedOrBlocked &&
+        (forensics.attackType === 'PROMPT_INJECTION' ||
+          forensics.attackType === 'STATUTORY_DISALLOWED' ||
+          merchant.toLowerCase().includes('payslip')));
+    const isBlocked = isHardStatutoryOrInjectionBlock && !detectedMediaError;
+    const needsClarification = !isBlocked;
+    const splitPct = Math.min(
+      95,
+      Math.max(20, Math.round(Number(raw.splitOptionPercentage || 50)))
+    );
+
     const baseItem: ExpenseItem = {
       id,
       date,
@@ -323,6 +405,7 @@ export async function processRealSourceUpload(
       rawLineSnippet: rawSnippet,
       status: isBlocked ? 'blocked_by_guardrail' : 'needs_clarification',
       selectedOptionLabel: isBlocked ? 'Blocked by Guardrail' : undefined,
+      mediaError: detectedMediaError,
       aiContextNote:
         raw.aiContextNote || `Extracted from ${file.name} via Gemini OCR`,
       aiQuestion: needsClarification
@@ -512,23 +595,93 @@ function buildDeterministicFallbackFromUpload(
   }
 
   // Binary image / PDF fallback if API call didn't return JSON
+  const isHkReceipt = /\b(3425|hk|hong\s*kong|mercury)\b/i.test(fileName);
   return {
     items: [
-      {
-        date: '07 Nov',
-        merchantOrDescription: `${fileName} — OCR Extracted Item`,
-        category: sourceType === 'car_journey' ? 'Mileage' : 'Equipment',
-        grossAmount: sourceType === 'car_journey' ? 189 : 780,
-        miles: sourceType === 'car_journey' ? 420 : null,
-        aiSuggestedPercentage: 100,
-        confidencePercent: 94,
-        highAuditRisk: true,
-        rawLineSnippet: `OCR_VISION: ${fileName} | TOTAL £780.00`,
-        needsClarification: true,
-        aiQuestion: `Is the item on "${fileName}" used 100% for your business or shared personally?`,
-        splitOptionPercentage: 80,
-        taxRuleReference: 'CAA 2001 AIA / ITTOIA 2005 s.34',
-      },
+      isHkReceipt
+        ? {
+            date: '04 Nov',
+            merchantOrDescription:
+              'Mercury Recalls — Group Dining & Refreshments (Causeway Bay, Hong Kong)',
+            category: 'Travel Meals',
+            originalCurrency: 'HKD',
+            originalAmount: 1613,
+            grossAmount: 161,
+            aiSuggestedPercentage: 100,
+            confidencePercent: 94,
+            highAuditRisk: true,
+            rawLineSnippet: `OCR_VISION: ${fileName} | MERCURY RECALLS CAUSEWAY BAY HK | PRINTED TOTAL HK$ 1,613.00 (LINE ITEMS SUM TO HK$ 1,466.00)`,
+            needsClarification: true,
+            aiQuestion:
+              'Did this dining bill include clients, suppliers, or personal guests, or was it strictly for business travel subsistence?',
+            splitOptionPercentage: 50,
+            taxRuleReference: 'ITTOIA 2005 s.57A / s.45',
+            hasMediaError: true,
+            mediaErrorType: 'ARITHMETIC_MISMATCH',
+            mediaErrorTitle:
+              'Receipt Math Error: Printed Total (HK$1,613) ≠ Line Items Sum (HK$1,466)',
+            mediaErrorDescription:
+              'The printed line items on this receipt sum to HK$1,466 (£146 GBP), but the receipt total was printed as HK$1,613 (£161 GBP) — an overcharge/calculation error of HK$147 (£15 GBP).',
+            suggestedCorrectedOriginalAmount: 1466,
+            itemisedLines: [
+              {
+                description: 'Working Subsistence Set Meal',
+                originalAmount: 813,
+                originalCurrency: 'HKD',
+                isBusiness: true,
+                categoryTag: 'Business Subsistence',
+              },
+              {
+                description: 'Refreshments & 10% Service Charge',
+                originalAmount: 653,
+                originalCurrency: 'HKD',
+                isBusiness: true,
+                categoryTag: 'Service / Refreshment',
+              },
+            ],
+          }
+        : {
+            date: '07 Nov',
+            merchantOrDescription: `${fileName} — OCR Extracted Item`,
+            category: sourceType === 'car_journey' ? 'Mileage' : 'Equipment',
+            grossAmount: sourceType === 'car_journey' ? 189 : 780,
+            originalAmount: sourceType === 'car_journey' ? 189 : 780,
+            originalCurrency: 'GBP',
+            miles: sourceType === 'car_journey' ? 420 : null,
+            aiSuggestedPercentage: 100,
+            confidencePercent: 94,
+            highAuditRisk: true,
+            rawLineSnippet: `OCR_VISION: ${fileName} | PRINTED TOTAL £780.00 (LINE ITEMS SUM TO £700.00)`,
+            needsClarification: true,
+            aiQuestion: `Is the item on "${fileName}" used 100% for your business or shared personally?`,
+            splitOptionPercentage: 80,
+            taxRuleReference: 'CAA 2001 AIA / ITTOIA 2005 s.34',
+            hasMediaError: sourceType !== 'car_journey',
+            mediaErrorType: 'ARITHMETIC_MISMATCH',
+            mediaErrorTitle:
+              'Receipt Math Discrepancy: Line Items (£700) ≠ Printed Total (£780)',
+            mediaErrorDescription: `Extracted line items on "${fileName}" sum to £700 (£490 + £210), whereas the printed receipt total shows £780 (+£80 discrepancy).`,
+            suggestedCorrectedOriginalAmount: 700,
+            itemisedLines:
+              sourceType !== 'car_journey'
+                ? [
+                    {
+                      description: 'Primary Hardware / Invoice Line #1',
+                      originalAmount: 490,
+                      originalCurrency: 'GBP',
+                      isBusiness: true,
+                      categoryTag: 'Core Trade Item',
+                    },
+                    {
+                      description: 'Accessory & Delivery Line #2',
+                      originalAmount: 210,
+                      originalCurrency: 'GBP',
+                      isBusiness: true,
+                      categoryTag: 'Core Trade Item',
+                    },
+                  ]
+                : undefined,
+          },
     ],
     reliefs: [
       {

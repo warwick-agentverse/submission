@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ShieldCheck,
   Activity,
@@ -12,6 +12,8 @@ import {
   Bot,
   ChevronDown,
   SlidersHorizontal,
+  Lock,
+  Bell,
 } from 'lucide-react';
 import {
   INITIAL_AUDIT_LOGS,
@@ -31,7 +33,9 @@ import {
   attachExpenseProof,
   computeTaxSummary,
   estimateMarginalSaving,
+  fixExpenseMediaError,
   getDeductibleAmount,
+  requestIssuerClarificationOnExpense,
   resolveExpenseClarification,
   toggleExpenseItemisedBillLine,
   toggleTaxReliefClaim,
@@ -41,6 +45,21 @@ import {
   RealSourceSlot,
   processRealSourceUpload,
 } from './utils/realUploadProcessor';
+import {
+  isExcelBinaryFileName,
+  parseExcelArrayBufferToRows,
+} from './utils/spreadsheetParser';
+import {
+  INITIAL_ENCRYPTED_VAULT_DOCUMENTS,
+  INITIAL_SECURITY_AUDIT_EVENTS,
+  INITIAL_VERIFIED_TAXPAYER_PROFILES,
+  EncryptedFinancialDocument,
+  KeyManagementMode,
+  SecurityAuditEvent,
+  cryptoShredDocument,
+  encryptFinancialDocumentInCode,
+  verifyDocumentOwnershipAndDecrypt,
+} from './utils/securityEngine';
 import {
   FULL_35_SYNTHETIC_TEST_CASES,
   ReceiptLineItem,
@@ -63,8 +82,18 @@ import {
 import { UnseenTestingLabModal } from './components/UnseenTestingLabModal';
 import { EvidenceAndOversightModal } from './components/EvidenceAndOversightModal';
 import { TaxAdvisorChatbot } from './components/TaxAdvisorChatbot';
+import {
+  SecurityComplianceModal,
+  SecurityModalTab,
+} from './components/SecurityComplianceModal';
+import { HmrcMessagesPanel } from './components/HmrcMessagesPanel';
+import {
+  HmrcRegulationChangeMessage,
+  INITIAL_HMRC_REGULATION_MESSAGES,
+  SIMULATED_NEW_HMRC_BULLETIN_PRESETS,
+} from './utils/hmrcRegulationMonitor';
 
-type ActiveStep = 1 | 2 | 3 | 4;
+type ActiveStep = 'messages' | 1 | 2 | 3 | 4;
 type AppMode = 'mock' | 'real';
 type OversightTab = 'evidence_folder' | 'second_bot_ca' | 'block_list';
 
@@ -101,6 +130,29 @@ export default function App() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isChatbotOpen, setIsChatbotOpen] = useState(false);
   const [isJudgeMenuOpen, setIsJudgeMenuOpen] = useState(false);
+
+  // Security, UK GDPR, CRA Anti-Fraud & AES-256-GCM Envelope Encryption Vault State
+  const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
+  const [securityModalTab, setSecurityModalTab] =
+    useState<SecurityModalTab>('idor_ownership');
+  const [activeProfileId, setActiveProfileId] = useState<string>(
+    'usr-sole-trader-49102'
+  );
+  const [keyManagementMode, setKeyManagementMode] =
+    useState<KeyManagementMode>('CMEK_CLOUD_KMS');
+  const [vaultDocuments, setVaultDocuments] = useState<
+    EncryptedFinancialDocument[]
+  >(INITIAL_ENCRYPTED_VAULT_DOCUMENTS);
+  const [securityEvents, setSecurityEvents] = useState<SecurityAuditEvent[]>(
+    INITIAL_SECURITY_AUDIT_EVENTS
+  );
+
+  // HMRC Regulation Monitor & Pending Hard-Code Update Messages State
+  const [hmrcMessages, setHmrcMessages] = useState<HmrcRegulationChangeMessage[]>(
+    INITIAL_HMRC_REGULATION_MESSAGES
+  );
+  const [isScanningHmrc, setIsScanningHmrc] = useState<boolean>(false);
+  const [isRegBannerDismissed, setIsRegBannerDismissed] = useState<boolean>(false);
 
   const expenses = appMode === 'mock' ? mockExpenses : realExpenses;
   const reliefs = appMode === 'mock' ? mockReliefs : realReliefs;
@@ -148,6 +200,107 @@ export default function App() {
       ...prev,
     ]);
   };
+
+  const handleRecordSecurityEvent = (
+    severity: SecurityAuditEvent['severity'],
+    category: SecurityAuditEvent['category'],
+    targetResourceId: string,
+    outcome: SecurityAuditEvent['outcome'],
+    summaryText: string
+  ) => {
+    const ts = new Date().toTimeString().split(' ')[0];
+    const activeProfile =
+      INITIAL_VERIFIED_TAXPAYER_PROFILES.find(
+        (p) => p.userId === activeProfileId
+      ) || INITIAL_VERIFIED_TAXPAYER_PROFILES[0];
+    setSecurityEvents((prev) => [
+      {
+        id: `sec-evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: ts,
+        severity,
+        category,
+        actorId: activeProfile.userId,
+        actorRole: activeProfile.role,
+        targetResourceId,
+        outcome,
+        summary: summaryText,
+      },
+      ...prev,
+    ]);
+  };
+
+  const handleChangeKeyManagementMode = (nextMode: KeyManagementMode) => {
+    setKeyManagementMode(nextMode);
+    setVaultDocuments((prev) =>
+      prev.map((doc) =>
+        doc.isCryptoShredded
+          ? doc
+          : encryptFinancialDocumentInCode({
+              documentId: doc.documentId,
+              fileName: doc.fileName,
+              sourceType: doc.sourceType,
+              ownerUserId: doc.ownerUserId,
+              ownerUtr: doc.ownerUtr,
+              ownerName: doc.ownerName,
+              plaintextContent: doc.decryptedSummaryForOwnerOnly,
+              grossAmountGbp: doc.grossAmountGbp,
+              keyManagementMode: nextMode,
+              createdAtIso: doc.createdAtIso,
+            })
+      )
+    );
+    handleRecordSecurityEvent(
+      'CRYPTO_EVENT',
+      'ENVELOPE_ENCRYPTION',
+      `kek-mode-${nextMode}`,
+      'ENCRYPTED',
+      `Rotated Key Encryption Key (KEK) wrapping mode to ${nextMode} (AES-256-GCM per-chunk DEKs re-wrapped under FIPS 140-2).`
+    );
+  };
+
+  const handleCryptoShredDocument = (documentId: string) => {
+    setVaultDocuments((prev) =>
+      prev.map((doc) =>
+        doc.documentId === documentId ? cryptoShredDocument(doc) : doc
+      )
+    );
+    handleRecordSecurityEvent(
+      'CRYPTO_EVENT',
+      'GDPR_RETENTION',
+      documentId,
+      'PURGED',
+      `Crypto-shredded all AES-256-GCM Data Encryption Keys (DEKs) for "${documentId}" under UK GDPR Art. 17 Right to Erasure (60-day retention purge).`
+    );
+  };
+
+  // URL parameter ?docId=... Anti-IDOR Guard: Checks if user or attacker put ?docId=... in URL
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedDocId = params.get('docId');
+    if (!requestedDocId) return;
+
+    const targetDoc = vaultDocuments.find(
+      (d) => d.documentId === requestedDocId
+    );
+    if (!targetDoc) return;
+
+    const activeProfile =
+      INITIAL_VERIFIED_TAXPAYER_PROFILES.find(
+        (p) => p.userId === activeProfileId
+      ) || INITIAL_VERIFIED_TAXPAYER_PROFILES[0];
+
+    const check = verifyDocumentOwnershipAndDecrypt({
+      requestingUserId: activeProfile.userId,
+      requestingRole: activeProfile.role,
+      sessionToken: activeProfile.sessionToken,
+      document: targetDoc,
+    });
+
+    if (!check.allowed) {
+      setSecurityModalTab('idor_ownership');
+      setIsSecurityModalOpen(true);
+    }
+  }, [activeProfileId, vaultDocuments]);
 
   const handleOpenOversightTab = (tab: OversightTab) => {
     setOversightModalTab(tab);
@@ -338,10 +491,43 @@ export default function App() {
       )
     );
 
+    const activeProfile =
+      INITIAL_VERIFIED_TAXPAYER_PROFILES.find(
+        (p) => p.userId === activeProfileId
+      ) || INITIAL_VERIFIED_TAXPAYER_PROFILES[0];
+    const encryptedDoc = encryptFinancialDocumentInCode({
+      documentId: `doc-49102-${Date.now().toString().slice(-5)}`,
+      fileName,
+      sourceType,
+      ownerUserId: activeProfile.userId,
+      ownerUtr: activeProfile.utrNumber,
+      ownerName: activeProfile.fullName,
+      plaintextContent: classifiedExpenses
+        .map(
+          (e) =>
+            `${e.date} | ${e.merchantOrDescription} | £${e.grossAmount} (${e.businessPercentage}% Work)`
+        )
+        .join(' || '),
+      grossAmountGbp: classifiedExpenses.reduce(
+        (acc, e) => acc + e.grossAmount,
+        0
+      ),
+      keyManagementMode,
+      createdAtIso: new Date().toISOString(),
+    });
+    setVaultDocuments((prev) => [encryptedDoc, ...prev]);
+    handleRecordSecurityEvent(
+      'CRYPTO_EVENT',
+      'ENVELOPE_ENCRYPTION',
+      encryptedDoc.documentId,
+      'ENCRYPTED',
+      `Encrypted uploaded "${fileName}" into ${encryptedDoc.chunks.length} AES-256-GCM chunk DEK(s) wrapped by ${keyManagementMode} & bound to owner ${activeProfile.userId}.`
+    );
+
     appendLog(
       'AI_CLASSIFY',
-      `Uploaded & classified "${fileName}" via ${modelUsed} (${classifiedExpenses.length} item(s) with Work/Split/Personal confirmed during upload)`,
-      `Tax delta +£${potentialTaxDelta.toLocaleString()} · Saved to /evidence_justifications/`
+      `Uploaded, classified & AES-256-GCM encrypted "${fileName}" via ${modelUsed} (${classifiedExpenses.length} item(s) bound to owner ${activeProfile.userId})`,
+      `Tax delta +£${potentialTaxDelta.toLocaleString()} · Encrypted DEK/KEK in Vault`
     );
   };
 
@@ -438,7 +624,41 @@ export default function App() {
         lowerName.endsWith('.json') ||
         lowerName.endsWith('.txt');
 
-      if (isTextOrCsv) {
+      if (isExcelBinaryFileName(file.name)) {
+        const buffer = await file.arrayBuffer();
+        const excelParsed = parseExcelArrayBufferToRows(
+          buffer,
+          file.name,
+          'receipt'
+        );
+        const excelRows = excelParsed.items;
+        if (excelRows.length > 0) {
+          const synthCsvLines = [
+            'date,merchant,category,amount_gbp,raw_text',
+            ...excelRows.map(
+              (r) =>
+                `"${r.date}","${r.merchantOrDescription}","${r.category || 'Equipment'}",${r.originalAmount},"${r.rawLineSnippet.replace(/"/g, "'")}"`
+            ),
+          ].join('\n');
+          const parsedCases = parseUploadedTextToUnseenCases(
+            file.name,
+            synthCsvLines
+          );
+          if (parsedCases.length > 0) {
+            setUnseenTestCases((prev) => [...parsedCases, ...prev]);
+            const newLedgerItems = parsedCases.map(convertUnseenCaseToExpenseItem);
+            setActiveExpenses((prev) => [...newLedgerItems, ...prev]);
+            appendLog(
+              'UNSEEN_EVAL',
+              `Parsed Excel workbook "${file.name}" (${parsedCases.length} unseen records)`,
+              `Approved: ${parsedCases.filter((c) => !c.forensics.isManipulatedOrBlocked).length} · Blocked/Tampered: ${parsedCases.filter((c) => c.forensics.isManipulatedOrBlocked).length}`
+            );
+            return;
+          }
+        }
+      }
+
+      if (isTextOrCsv || lowerName.endsWith('.tsv')) {
         const textContent = await file.text();
         const parsedCases = parseUploadedTextToUnseenCases(file.name, textContent);
         if (parsedCases.length > 0) {
@@ -706,6 +926,51 @@ export default function App() {
     );
   };
 
+  const handleFixMediaError = (
+    expenseId: string,
+    correctedGrossAmountGbp: number,
+    correctedDate?: string,
+    resolutionNote?: string
+  ) => {
+    const updated = fixExpenseMediaError(
+      expenses,
+      expenseId,
+      correctedGrossAmountGbp,
+      correctedDate,
+      resolutionNote
+    );
+    setActiveExpenses(updated);
+    const resolvedItem = updated.find((e) => e.id === expenseId);
+    if (resolvedItem) {
+      const ded = getDeductibleAmount(resolvedItem, strictGuardrail);
+      appendLog(
+        'USER_DECISION',
+        `Fixed media error on "${resolvedItem.merchantOrDescription}" → £${resolvedItem.grossAmount} GBP`,
+        `Deductible = £${ded} · ${resolvedItem.mediaError?.resolutionNote || 'Corrected by user'}`
+      );
+    }
+  };
+
+  const handleRequestIssuerClarification = (
+    expenseId: string,
+    customDraftMessage?: string
+  ) => {
+    const updated = requestIssuerClarificationOnExpense(
+      expenses,
+      expenseId,
+      customDraftMessage
+    );
+    setActiveExpenses(updated);
+    const targetItem = updated.find((e) => e.id === expenseId);
+    if (targetItem) {
+      appendLog(
+        'GUARDRAIL_ENFORCED',
+        `Flagged "${targetItem.merchantOrDescription}" as Awaiting Issuer Clarification (Deduction held at £0 until corrected receipt is issued)`,
+        `Deductible = £0 · Issuer query logged in /evidence_justifications/`
+      );
+    }
+  };
+
   const handleToggleRelief = (reliefId: string) => {
     const target = reliefs.find((r) => r.id === reliefId);
     setActiveReliefs((prev) => toggleTaxReliefClaim(prev, reliefId));
@@ -760,6 +1025,225 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const handleApproveAndApplyHmrcPatch = (messageId: string) => {
+    const targetMsg = hmrcMessages.find((m) => m.id === messageId);
+    if (!targetMsg) return;
+
+    const nowTs = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    setHmrcMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId
+          ? {
+              ...m,
+              status: 'approved_and_applied_to_code',
+              expertReviewedAt: nowTs,
+              expertReviewerName: 'Chartered Tax Adviser (ICAEW #88412)',
+            }
+          : m
+      )
+    );
+
+    if (targetMsg.runtimeCodeOverride?.mileageRateFirst10k) {
+      const nextRate = targetMsg.runtimeCodeOverride.mileageRateFirst10k;
+      setActiveExpenses((prev) =>
+        prev.map((exp) => {
+          if (exp.source === 'car_journey' && exp.miles && exp.miles > 0) {
+            return {
+              ...exp,
+              grossAmount: Math.round(exp.miles * nextRate),
+              taxRuleReference: `ITTOIA 2005 s.94D (Updated ${Math.round(
+                nextRate * 100
+              )}p/mi FA 2026 — Expert Approved)`,
+            };
+          }
+          return exp;
+        })
+      );
+    }
+
+    if (targetMsg.runtimeCodeOverride?.homeOfficeMultiplierOverride) {
+      const nextMult = targetMsg.runtimeCodeOverride.homeOfficeMultiplierOverride;
+      setActiveReliefs((prev) =>
+        prev.map((rel) => {
+          if (rel.id === 'relief-home-office') {
+            return {
+              ...rel,
+              annualDeductionAmount: Math.round(4800 * nextMult),
+              rawInputs: rel.rawInputs
+                ? {
+                    ...rel.rawInputs,
+                    statutoryMultiplier: nextMult,
+                    formulaExplanation: `1 room / 5 total rooms × (32 hrs / 40 hrs) + updated ${Math.round(
+                      nextMult * 100
+                    )}% studio utility factor = ${Math.round(
+                      nextMult * 100
+                    )}% of £4,800 = £${Math.round(4800 * nextMult).toLocaleString()}`,
+                  }
+                : undefined,
+            };
+          }
+          return rel;
+        })
+      );
+    }
+
+    appendLog(
+      'CA_REVIEW',
+      `Expert Approved HMRC Hard-Code Patch (${targetMsg.hmrcNoticeReference}): Updated ${targetMsg.targetFile} :: ${targetMsg.targetFunctionOrConstant}`,
+      `Status: pending_expert_approval -> approved_and_applied_to_code | Impact: ${targetMsg.estimatedUserImpactLabel}`
+    );
+  };
+
+  const handleRevertOrRejectHmrcPatch = (messageId: string) => {
+    const targetMsg = hmrcMessages.find((m) => m.id === messageId);
+    if (!targetMsg) return;
+
+    const nowTs = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    setHmrcMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId
+          ? {
+              ...m,
+              status: 'rejected_by_expert',
+              expertReviewedAt: nowTs,
+              expertReviewerName: 'Chartered Tax Adviser (ICAEW #88412)',
+            }
+          : m
+      )
+    );
+
+    if (targetMsg.runtimeCodeOverride?.mileageRateFirst10k) {
+      setActiveExpenses((prev) =>
+        prev.map((exp) => {
+          if (exp.source === 'car_journey' && exp.miles && exp.miles > 0) {
+            return {
+              ...exp,
+              grossAmount: Math.round(exp.miles * 0.45),
+              taxRuleReference: 'ITTOIA 2005 s.94D (45p/mi First 10k)',
+            };
+          }
+          return exp;
+        })
+      );
+    }
+
+    if (targetMsg.runtimeCodeOverride?.homeOfficeMultiplierOverride) {
+      setActiveReliefs((prev) =>
+        prev.map((rel) => {
+          if (rel.id === 'relief-home-office') {
+            return {
+              ...rel,
+              annualDeductionAmount: Math.round(4800 * 0.35),
+              rawInputs: rel.rawInputs
+                ? {
+                    ...rel.rawInputs,
+                    statutoryMultiplier: 0.35,
+                  }
+                : undefined,
+            };
+          }
+          return rel;
+        })
+      );
+    }
+
+    appendLog(
+      'CA_REVIEW',
+      `Expert Held/Reverted HMRC Patch (${targetMsg.hmrcNoticeReference}) on ${targetMsg.targetFile}`,
+      `Status: -> rejected_by_expert | Hard-coded deterministic engine kept at baseline statutory constants.`
+    );
+  };
+
+  const handleSimulateLiveHmrcScan = async (customBulletinText?: string) => {
+    setIsScanningHmrc(true);
+    const defaultPreset = SIMULATED_NEW_HMRC_BULLETIN_PRESETS[0];
+    const bulletinToScan = customBulletinText || defaultPreset.bulletinText;
+
+    try {
+      const response = await fetch('/api/gemini/hmrc-regulation-scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bulletinText: bulletinToScan }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      const nowStr =
+        new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+      const newMsg: HmrcRegulationChangeMessage = {
+        id: `hmrc-reg-live-${Date.now()}`,
+        detectedAt: nowStr,
+        hmrcNoticeReference:
+          data.hmrcNoticeReference ||
+          defaultPreset.fallbackMessage.hmrcNoticeReference,
+        hmrcManualSection:
+          data.hmrcManualSection || defaultPreset.fallbackMessage.hmrcManualSection,
+        officialSourceUrl:
+          defaultPreset.fallbackMessage.officialSourceUrl,
+        category: data.category || defaultPreset.fallbackMessage.category,
+        unreadByUser: true,
+        status: 'pending_expert_approval',
+        userNotificationTitle:
+          data.userNotificationTitle ||
+          defaultPreset.fallbackMessage.userNotificationTitle,
+        userNotificationSummary:
+          data.userNotificationSummary ||
+          defaultPreset.fallbackMessage.userNotificationSummary,
+        estimatedUserImpactLabel:
+          data.estimatedUserImpactLabel ||
+          defaultPreset.fallbackMessage.estimatedUserImpactLabel,
+        expertTechnicalRationale:
+          data.expertTechnicalRationale ||
+          defaultPreset.fallbackMessage.expertTechnicalRationale,
+        targetFile:
+          data.targetFile || defaultPreset.fallbackMessage.targetFile,
+        targetFunctionOrConstant:
+          data.targetFunctionOrConstant ||
+          defaultPreset.fallbackMessage.targetFunctionOrConstant,
+        currentHardCodeSnippet:
+          data.currentHardCodeSnippet ||
+          defaultPreset.fallbackMessage.currentHardCodeSnippet,
+        proposedHardCodeSnippet:
+          data.proposedHardCodeSnippet ||
+          defaultPreset.fallbackMessage.proposedHardCodeSnippet,
+        proposedPythonDecimalDiff:
+          data.proposedPythonDecimalDiff ||
+          defaultPreset.fallbackMessage.proposedPythonDecimalDiff,
+      };
+
+      setHmrcMessages((prev) => [newMsg, ...prev]);
+      setIsRegBannerDismissed(false);
+      appendLog(
+        'INGEST',
+        `AI HMRC Regulation Monitor detected legislative change: ${newMsg.hmrcNoticeReference}`,
+        `Queued hard-code diff for ${newMsg.targetFile} (${newMsg.targetFunctionOrConstant}) pending Chartered Tax Adviser approval.`
+      );
+    } catch {
+      const fallbackMsg: HmrcRegulationChangeMessage = {
+        ...defaultPreset.fallbackMessage,
+        id: `hmrc-reg-fallback-${Date.now()}`,
+        detectedAt:
+          new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
+        status: 'pending_expert_approval',
+      };
+      setHmrcMessages((prev) => [fallbackMsg, ...prev]);
+      setIsRegBannerDismissed(false);
+      appendLog(
+        'INGEST',
+        `AI HMRC Regulation Monitor scanned bulletin: ${fallbackMsg.hmrcNoticeReference}`,
+        `Drafted hard-code patch for ${fallbackMsg.targetFile} (${fallbackMsg.targetFunctionOrConstant}) pending expert sign-off.`
+      );
+    } finally {
+      setIsScanningHmrc(false);
+    }
+  };
+
+  const pendingHmrcCount = hmrcMessages.filter(
+    (m) => m.status === 'pending_expert_approval'
+  ).length;
   const pendingQuestionsCount = expenses.filter(
     (e) => e.status === 'needs_clarification'
   ).length;
@@ -781,25 +1265,65 @@ export default function App() {
     { step: 4 as const, label: '4. Ledger', count: null },
   ];
 
-  // Progress across the 4 stages (25% -> 50% -> 75% -> 100%)
-  const stageProgressPercent = (activeStep / 4) * 100;
+  // Progress across the stages
+  const stageProgressPercent =
+    typeof activeStep === 'number' ? (activeStep / 4) * 100 : 20;
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F172A]">
       {/* Clean 3-Zone Top Bar + Thin Stage Progress Bar */}
       <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-slate-200 relative">
         <div className="max-w-5xl mx-auto flex items-center justify-between gap-4 px-6 py-3">
-          {/* Zone 1: Brand Wordmark */}
-          <a
-            href="#overview"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveStep(1);
-            }}
-            className="text-lg font-extrabold tracking-tight text-slate-900 font-display whitespace-nowrap shrink-0"
-          >
-            Taximiser
-          </a>
+          {/* Zone 1: Brand Wordmark + Messages Tab (Directly Between Taximiser & 1. Upload) */}
+          <div className="flex items-center gap-3 shrink-0">
+            <a
+              href="#overview"
+              onClick={(e) => {
+                e.preventDefault();
+                setActiveStep(1);
+              }}
+              className="text-lg font-extrabold tracking-tight text-slate-900 font-display whitespace-nowrap shrink-0"
+            >
+              Taximiser
+            </a>
+
+            <button
+              type="button"
+              data-testid="messages-tab-btn"
+              onClick={() => setActiveStep('messages')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+                activeStep === 'messages'
+                  ? 'bg-amber-600 text-white border-amber-700 shadow-xs'
+                  : pendingHmrcCount > 0
+                  ? 'bg-amber-50 text-amber-950 border-amber-300 hover:bg-amber-100'
+                  : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+              }`}
+              title="HMRC Tax Regulation Changes & Pending Hard-Code Updates for Expert Verification"
+            >
+              <Bell
+                className={`w-3.5 h-3.5 ${
+                  activeStep === 'messages'
+                    ? 'text-white'
+                    : pendingHmrcCount > 0
+                    ? 'text-amber-700 animate-pulse'
+                    : 'text-slate-500'
+                }`}
+              />
+              <span>Messages</span>
+              {pendingHmrcCount > 0 && (
+                <span
+                  data-testid="messages-pending-badge"
+                  className={`font-mono text-[11px] font-bold px-1.5 py-0.2 rounded-full ${
+                    activeStep === 'messages'
+                      ? 'bg-white text-amber-900'
+                      : 'bg-amber-600 text-white'
+                  }`}
+                >
+                  {pendingHmrcCount}
+                </span>
+              )}
+            </button>
+          </div>
 
           {/* Zone 2: Single Unified Step Navigation */}
           <nav
@@ -834,8 +1358,22 @@ export default function App() {
             })}
           </nav>
 
-          {/* Zone 3: Primary Action */}
+          {/* Zone 3: Security Vault + Primary Action */}
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              data-testid="open-security-vault-btn"
+              onClick={() => {
+                setSecurityModalTab('idor_ownership');
+                setIsSecurityModalOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-900 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title="UK GDPR, DPA 2018, AES-256-GCM Envelope Encryption, CRA Identity & Anti-IDOR Ownership Vault"
+            >
+              <Lock className="w-3.5 h-3.5 text-emerald-700" />
+              <span className="hidden sm:inline">Security &amp; GDPR Vault</span>
+              <span className="sm:hidden">Security</span>
+            </button>
             <button
               type="button"
               onClick={() => setIsExportModalOpen(true)}
@@ -864,6 +1402,60 @@ export default function App() {
 
       {/* Main Content Container */}
       <main className="flex-1 max-w-5xl w-full mx-auto px-6 py-6 space-y-5">
+        {/* HMRC Tax Regulation Change Notification Banner */}
+        {pendingHmrcCount > 0 && activeStep !== 'messages' && !isRegBannerDismissed && (
+          <div
+            data-testid="hmrc-reg-notification-banner"
+            role="region"
+            aria-label="HMRC Tax Regulation Change Notification"
+            className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-lg bg-amber-600 text-white flex items-center justify-center shrink-0 mt-0.5">
+                <Bell className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-extrabold uppercase tracking-wider text-amber-950">
+                    HMRC Tax Regulations Have Changed ({pendingHmrcCount} Pending Hard-Code{' '}
+                    {pendingHmrcCount === 1 ? 'Update' : 'Updates'})
+                  </span>
+                  <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-amber-200/80 text-amber-950">
+                    Programme Update Pending Expert Approval
+                  </span>
+                </div>
+                <p className="text-xs text-amber-900 mt-1 leading-relaxed">
+                  Our AI regulatory monitor detected changes in HMRC tax code (including{' '}
+                  <span className="font-mono font-semibold">ITTOIA 2005 s.94D</span> mileage
+                  relief and <span className="font-mono font-semibold">BIM47820</span> home
+                  office allowances) and drafted proposed updates to the hard-coded{' '}
+                  <span className="font-mono font-semibold">src/utils/taxEngine.ts</span>{' '}
+                  engine for Chartered Tax Adviser verification. The programme will be updated
+                  pending approval under the <strong>Messages</strong> tab.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                data-testid="banner-open-messages-btn"
+                onClick={() => setActiveStep('messages')}
+                className="px-3.5 py-2 rounded-lg text-xs font-bold bg-amber-700 text-white hover:bg-amber-800 transition-colors whitespace-nowrap cursor-pointer"
+              >
+                Review Pending Updates in Messages ({pendingHmrcCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsRegBannerDismissed(true)}
+                className="px-2.5 py-2 rounded-lg text-xs font-semibold text-amber-900 hover:bg-amber-100 transition-colors cursor-pointer"
+                title="Dismiss banner (updates remain in Messages tab)"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Clean Header Row + 4-Card KPI Strip */}
         <section id="overview" aria-labelledby="overview-heading" className="space-y-3.5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -980,6 +1572,24 @@ export default function App() {
                       </span>
                     </button>
 
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsJudgeMenuOpen(false);
+                        setSecurityModalTab('idor_ownership');
+                        setIsSecurityModalOpen(true);
+                      }}
+                      className="w-full px-2.5 py-2 text-left rounded-lg hover:bg-slate-50 flex items-center justify-between gap-2 cursor-pointer"
+                    >
+                      <span className="inline-flex items-center gap-2 font-semibold text-slate-800">
+                        <Lock className="w-3.5 h-3.5 text-emerald-700" />
+                        Security, CRA &amp; GDPR Vault
+                      </span>
+                      <span className="text-[11px] font-mono text-emerald-700 font-semibold">
+                        AES-256
+                      </span>
+                    </button>
+
                     <div className="pt-1 mt-1 border-t border-slate-100">
                       <button
                         type="button"
@@ -1067,6 +1677,17 @@ export default function App() {
         </section>
 
         {/* Active Step Content */}
+        {activeStep === 'messages' && (
+          <HmrcMessagesPanel
+            messages={hmrcMessages}
+            onApproveAndApplyPatch={handleApproveAndApplyHmrcPatch}
+            onRevertOrRejectPatch={handleRevertOrRejectHmrcPatch}
+            onSimulateLiveHmrcScan={handleSimulateLiveHmrcScan}
+            isScanningHmrc={isScanningHmrc}
+            onGoToUploadStep={() => setActiveStep(1)}
+          />
+        )}
+
         {activeStep === 1 && (
           <IngestionHub
             appMode={appMode}
@@ -1095,6 +1716,8 @@ export default function App() {
             onToggleItemisedBillLine={handleToggleItemisedBillLine}
             onAttachProof={handleAttachProof}
             onReopenClarification={handleReopenClarification}
+            onFixMediaError={handleFixMediaError}
+            onRequestIssuerClarification={handleRequestIssuerClarification}
             onInspectTrace={(item) => setTraceItem(item)}
             onOpenEvidenceFolder={() => handleOpenOversightTab('evidence_folder')}
             onJumpToSources={() => setActiveStep(1)}
@@ -1157,10 +1780,11 @@ export default function App() {
             </button>
             <button
               type="button"
+              data-testid="open-flowchart-modal-btn"
               onClick={() => setIsAuditModalOpen(true)}
               className="hover:text-slate-700 cursor-pointer"
             >
-              Benchmarks &amp; Log
+              Decision Tree &amp; Benchmarks
             </button>
             <button
               type="button"
@@ -1217,6 +1841,21 @@ export default function App() {
         onApproveCaItem={handleApproveCaItem}
         onApproveAllCaItems={handleApproveAllCaItems}
         onTestCodedBlockListOverride={handleTestCodedBlockListOverride}
+      />
+
+      <SecurityComplianceModal
+        isOpen={isSecurityModalOpen}
+        onClose={() => setIsSecurityModalOpen(false)}
+        initialTab={securityModalTab}
+        profiles={INITIAL_VERIFIED_TAXPAYER_PROFILES}
+        activeProfileId={activeProfileId}
+        onSelectActiveProfile={setActiveProfileId}
+        vaultDocuments={vaultDocuments}
+        keyManagementMode={keyManagementMode}
+        onChangeKeyManagementMode={handleChangeKeyManagementMode}
+        onCryptoShredDocument={handleCryptoShredDocument}
+        securityEvents={securityEvents}
+        onRecordSecurityEvent={handleRecordSecurityEvent}
       />
 
       <TaxAdvisorChatbot

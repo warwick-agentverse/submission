@@ -20,9 +20,28 @@ import {
   toggleExpenseItemisedBillLine,
   getOrBuildItemisedBillLines,
   computeItemisedBillSummary,
+  detectMediaErrorsOnItem,
+  fixExpenseMediaError,
+  requestIssuerClarificationOnExpense,
   ExpenseItem,
   TaxReliefSubsidy,
 } from './taxEngine';
+import {
+  generateSampleSpreadsheetBuffer,
+  parseExcelArrayBufferToRows,
+  parseCsvTextToRows,
+} from './spreadsheetParser';
+import {
+  INITIAL_VERIFIED_TAXPAYER_PROFILES,
+  encryptFinancialDocumentInCode,
+  verifyDocumentOwnershipAndDecrypt,
+  verifyCraIdentityAndPreventDuplicateProfile,
+  cryptoShredDocument,
+} from './securityEngine';
+import {
+  INITIAL_HMRC_REGULATION_MESSAGES,
+  SIMULATED_NEW_HMRC_BULLETIN_PRESETS,
+} from './hmrcRegulationMonitor';
 import {
   detectCurrencyFromTextAndMerchant,
   convertForeignAmountToGbp,
@@ -383,4 +402,193 @@ test('foreign currency detection (HKD -> GBP), custom percentage split, and clic
   assert.ok(toggledItem.businessPercentage < 100);
 });
 
+test('spreadsheetParser reads .xlsx and .csv across all 4 supported expense types (bank_statement, receipt, invoice, car_journey)', () => {
+  const sourceTypes = [
+    'bank_statement',
+    'receipt',
+    'invoice',
+    'car_journey',
+  ] as const;
 
+  for (const st of sourceTypes) {
+    const xlsxSample = generateSampleSpreadsheetBuffer(st, 'xlsx');
+    const parsedXlsx = parseExcelArrayBufferToRows(
+      xlsxSample.data as Uint8Array,
+      xlsxSample.fileName,
+      st
+    );
+    assert.ok(parsedXlsx.items.length >= 2, `Expected >=2 rows from ${st} .xlsx`);
+
+    const csvSample = generateSampleSpreadsheetBuffer(st, 'csv');
+    const parsedCsv = parseCsvTextToRows(
+      String(csvSample.data),
+      csvSample.fileName,
+      st
+    );
+    assert.ok(parsedCsv.items.length >= 2, `Expected >=2 rows from ${st} .csv`);
+  }
+});
+
+test('detectMediaErrorsOnItem flags arithmetic mismatches and supports Fix Mistake or Seek Clarification from Issuer', () => {
+  const receiptWithMathError: ExpenseItem = {
+    id: 'exp-err-1',
+    date: '07 Nov',
+    merchantOrDescription: 'Hoxton Grill (Receipt Total Mismatch)',
+    source: 'receipt',
+    sourceDocumentName: 'hoxton_receipt.jpg',
+    category: 'Travel Meals',
+    grossAmount: 185,
+    businessPercentage: 58,
+    aiSuggestedPercentage: 58,
+    status: 'needs_clarification',
+    taxRuleReference: 'ITTOIA 2005 s.57A',
+    itemisedBillLines: [
+      {
+        id: 'l-1',
+        description: 'Working Lunch',
+        amountGbp: 95,
+        isBusiness: true,
+      },
+      {
+        id: 'l-2',
+        description: 'Guest Cocktails',
+        amountGbp: 70,
+        isBusiness: false,
+      },
+    ],
+  };
+
+  const detected = detectMediaErrorsOnItem({
+    merchant: receiptWithMathError.merchantOrDescription,
+    date: receiptWithMathError.date,
+    sourceDocumentName: receiptWithMathError.sourceDocumentName,
+    grossAmountGbp: receiptWithMathError.grossAmount,
+    itemisedLines: receiptWithMathError.itemisedBillLines,
+  });
+  assert.ok(detected !== undefined);
+  assert.equal(detected?.hasError, true);
+  assert.equal(detected?.errorType, 'ARITHMETIC_MISMATCH');
+  assert.equal(detected?.suggestedCorrectedAmountGbp, 165);
+
+  const itemWithError: ExpenseItem = {
+    ...receiptWithMathError,
+    mediaError: detected,
+  };
+
+  // Option B: Seek Clarification from Issuer holds deductible claim at £0
+  const awaitingList = requestIssuerClarificationOnExpense(
+    [itemWithError],
+    'exp-err-1'
+  );
+  assert.equal(
+    awaitingList[0].mediaError?.resolutionStatus,
+    'awaiting_issuer_clarification'
+  );
+  assert.equal(getDeductibleAmount(awaitingList[0], true), 0);
+
+  // Option A: Fix Mistake updates grossAmount to £165 and marks fixed_by_user
+  const fixedList = fixExpenseMediaError(awaitingList, 'exp-err-1', 165);
+  assert.equal(fixedList[0].grossAmount, 165);
+  assert.equal(fixedList[0].mediaError?.resolutionStatus, 'fixed_by_user');
+  assert.ok(getDeductibleAmount(fixedList[0], true) > 0);
+});
+
+test('securityEngine enforces AES-256-GCM per-chunk envelope encryption, anti-IDOR document ownership checks, CRA duplicate profile blocking, and UK GDPR crypto-shredding', () => {
+  const encryptedDoc = encryptFinancialDocumentInCode({
+    documentId: 'doc-49102-test',
+    fileName: 'monzo_q3_statement.csv',
+    sourceType: 'bank_statement',
+    ownerUserId: 'usr-sole-trader-49102',
+    ownerUtr: '4910288341',
+    ownerName: 'Alex Mercer',
+    plaintextContent:
+      'SENSITIVE PII: 14 Clerkenwell Green EC1R 0DP | SORT CODE 04-00-04 | BALANCE £44,210.00 | MACBOOK PRO £2,400.00',
+    grossAmountGbp: 2400,
+    keyManagementMode: 'CMEK_CLOUD_KMS',
+  });
+
+  assert.ok(encryptedDoc.chunks.length >= 2);
+  assert.equal(encryptedDoc.chunks[0].algorithm, 'AES-256-GCM');
+  assert.notEqual(
+    encryptedDoc.chunks[0].dekId,
+    encryptedDoc.chunks[1].dekId,
+    'Each chunk must use a unique Data Encryption Key (DEK)'
+  );
+  assert.ok(
+    !encryptedDoc.chunks[0].ciphertextBase64.includes('Clerkenwell'),
+    'Ciphertext must not expose plaintext addresses or financial positions'
+  );
+
+  // 1. Legitimate owner can verify ownership and decrypt
+  const ownerAccess = verifyDocumentOwnershipAndDecrypt({
+    requestingUserId: 'usr-sole-trader-49102',
+    requestingRole: 'AUTHENTICATED_TAXPAYER',
+    sessionToken: 'sess-valid-token',
+    document: encryptedDoc,
+  });
+  assert.equal(ownerAccess.allowed, true);
+  assert.equal(ownerAccess.httpStatus, 200);
+
+  // 2. External user changing the URL / documentId is blocked with 403 IDOR_OWNERSHIP_VIOLATION
+  const idorAttack = verifyDocumentOwnershipAndDecrypt({
+    requestingUserId: 'usr-other-tenant-88319',
+    requestingRole: 'EXTERNAL_OTHER_USER',
+    sessionToken: 'sess-other-token',
+    document: encryptedDoc,
+  });
+  assert.equal(idorAttack.allowed, false);
+  assert.equal(idorAttack.httpStatus, 403);
+  assert.equal(idorAttack.errorCode, 'IDOR_OWNERSHIP_VIOLATION');
+
+  // 3. Internal support staff is blocked by Zero-Trust envelope isolation
+  const internalAttempt = verifyDocumentOwnershipAndDecrypt({
+    requestingUserId: 'usr-internal-staff-007',
+    requestingRole: 'INTERNAL_SUPPORT_ENGINEER',
+    sessionToken: 'sess-internal-token',
+    document: encryptedDoc,
+  });
+  assert.equal(internalAttempt.allowed, false);
+  assert.equal(internalAttempt.httpStatus, 403);
+  assert.equal(internalAttempt.errorCode, 'INTERNAL_ACTOR_ZERO_TRUST_BLOCK');
+
+  // 4. Credit Reference Agency (CRA) duplicate profile fraud attempt is blocked
+  const duplicateCraAttempt = verifyCraIdentityAndPreventDuplicateProfile({
+    candidateFullName: 'Alex Mercer Duplicate Account',
+    candidateDob: '1989-04-14',
+    candidateUtr: '4910288341',
+    candidateNino: 'QQ 12 34 56 C',
+    candidateAddress: '14 Clerkenwell Green, London',
+    candidatePostcode: 'EC1R 0DP',
+    existingProfiles: INITIAL_VERIFIED_TAXPAYER_PROFILES,
+  });
+  assert.equal(duplicateCraAttempt.allowed, false);
+  assert.equal(duplicateCraAttempt.status, 'DUPLICATE_CRA_PROFILE_BLOCKED');
+
+  // 5. Crypto-shredding destroys DEKs under UK GDPR Art. 17
+  const shredded = cryptoShredDocument(encryptedDoc);
+  const accessAfterShred = verifyDocumentOwnershipAndDecrypt({
+    requestingUserId: 'usr-sole-trader-49102',
+    requestingRole: 'AUTHENTICATED_TAXPAYER',
+    sessionToken: 'sess-valid-token',
+    document: shredded,
+  });
+  assert.equal(accessAfterShred.allowed, false);
+  assert.equal(accessAfterShred.httpStatus, 410);
+});
+
+test('HMRC Regulation Monitor provides pending hard-code diffs for src/utils/taxEngine.ts and expert verification rationales', () => {
+  assert.equal(INITIAL_HMRC_REGULATION_MESSAGES.length, 3);
+  for (const msg of INITIAL_HMRC_REGULATION_MESSAGES) {
+    assert.equal(msg.status, 'pending_expert_approval');
+    assert.equal(msg.targetFile, 'src/utils/taxEngine.ts');
+    assert.ok(msg.currentHardCodeSnippet.length > 20);
+    assert.ok(msg.proposedHardCodeSnippet.length > 20);
+    assert.notEqual(msg.currentHardCodeSnippet, msg.proposedHardCodeSnippet);
+    assert.ok(msg.expertTechnicalRationale.length > 10);
+  }
+  assert.equal(
+    INITIAL_HMRC_REGULATION_MESSAGES[0].runtimeCodeOverride?.mileageRateFirst10k,
+    0.48
+  );
+  assert.ok(SIMULATED_NEW_HMRC_BULLETIN_PRESETS.length >= 1);
+});

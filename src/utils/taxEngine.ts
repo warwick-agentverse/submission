@@ -94,6 +94,34 @@ export interface ItemisedBillLine {
   categoryTag?: string;
 }
 
+export type MediaErrorType =
+  | 'ARITHMETIC_MISMATCH'
+  | 'DUPLICATE_CHARGE'
+  | 'DATE_OR_TAX_YEAR_ERROR'
+  | 'MISSING_INVOICE_OR_VAT_DETAILS'
+  | 'ISSUER_BILLING_MISTAKE';
+
+export type MediaErrorResolutionStatus =
+  | 'unresolved'
+  | 'fixed_by_user'
+  | 'awaiting_issuer_clarification';
+
+export interface MediaErrorInfo {
+  hasError: boolean;
+  errorType: MediaErrorType;
+  title: string;
+  description: string;
+  claimedAmountGbp: number;
+  suggestedCorrectedAmountGbp: number;
+  claimedOriginalAmount?: number;
+  suggestedCorrectedOriginalAmount?: number;
+  originalCurrency?: string;
+  discrepancyGbp: number;
+  issuerClarificationDraft: string;
+  resolutionStatus: MediaErrorResolutionStatus;
+  resolutionNote?: string;
+}
+
 export interface ExpenseItem {
   id: string;
   date: string;
@@ -123,6 +151,8 @@ export interface ExpenseItem {
   restaurantMetadata?: RestaurantItemisationMetadata;
   /** Interactive itemised bill lines allowing user to click which items were for business */
   itemisedBillLines?: ItemisedBillLine[];
+  /** Detected error/discrepancy in the uploaded receipt, invoice, or spreadsheet media */
+  mediaError?: MediaErrorInfo;
   aiQuestion?: string;
   aiContextNote?: string;
   clarificationOptions?: ClarificationOption[];
@@ -477,6 +507,14 @@ export function getDeductibleAmount(
     item.rawLineSnippet
   );
   if (blockRule || item.status !== 'verified') {
+    return 0;
+  }
+
+  // If uploaded media has an error awaiting clarification from the issuer, hold deduction at £0
+  if (
+    item.mediaError?.hasError &&
+    item.mediaError.resolutionStatus === 'awaiting_issuer_clarification'
+  ) {
     return 0;
   }
 
@@ -1614,4 +1652,300 @@ export function toggleExpenseItemisedBillLine(
     item.id === expenseId ? toggleItemisedLineOnSingleItem(item, lineId) : item
   );
 }
+
+/**
+ * Deterministic Media Error Detector:
+ * Inspects an extracted receipt, invoice, bank row, or mileage entry (along with any
+ * AI-detected error metadata) to flag arithmetic mistakes, line-item sum mismatches,
+ * duplicate charges, out-of-bounds tax year dates, or missing VAT/issuer details.
+ */
+export function detectMediaErrorsOnItem(params: {
+  merchant: string;
+  date: string;
+  sourceDocumentName: string;
+  grossAmountGbp: number;
+  originalAmount?: number;
+  originalCurrency?: string;
+  fxRatePerGbp?: number;
+  rawText?: string;
+  itemisedLines?: ItemisedBillLine[];
+  aiDetectedError?: {
+    hasMediaError?: boolean;
+    mediaErrorType?: string;
+    mediaErrorTitle?: string;
+    mediaErrorDescription?: string;
+    suggestedCorrectedOriginalAmount?: number;
+    issuerClarificationDraft?: string;
+  };
+}): MediaErrorInfo | undefined {
+  const {
+    merchant,
+    date,
+    sourceDocumentName,
+    grossAmountGbp,
+    originalAmount,
+    originalCurrency = 'GBP',
+    fxRatePerGbp = 1,
+    rawText = '',
+    itemisedLines = [],
+    aiDetectedError,
+  } = params;
+
+  const isForeign = originalCurrency !== 'GBP' && fxRatePerGbp > 0;
+  const nativeClaimed =
+    isForeign && originalAmount ? originalAmount : grossAmountGbp;
+  const currencyLabel = isForeign ? originalCurrency : 'GBP';
+
+  // 1. Check if AI Vision OCR explicitly flagged an error on the uploaded media
+  if (aiDetectedError?.hasMediaError && aiDetectedError.mediaErrorDescription) {
+    const suggestedOrig =
+      typeof aiDetectedError.suggestedCorrectedOriginalAmount === 'number' &&
+      aiDetectedError.suggestedCorrectedOriginalAmount > 0
+        ? aiDetectedError.suggestedCorrectedOriginalAmount
+        : nativeClaimed;
+    const suggestedGbp = isForeign
+      ? Math.max(1, Math.round(suggestedOrig / fxRatePerGbp))
+      : Math.max(1, Math.round(suggestedOrig));
+    const discrepancyGbp = Math.abs(grossAmountGbp - suggestedGbp);
+    const rawType = (aiDetectedError.mediaErrorType || '').toUpperCase();
+    const errorType: MediaErrorType =
+      rawType === 'DUPLICATE_CHARGE' ||
+      rawType === 'DATE_OR_TAX_YEAR_ERROR' ||
+      rawType === 'MISSING_INVOICE_OR_VAT_DETAILS' ||
+      rawType === 'ISSUER_BILLING_MISTAKE'
+        ? (rawType as MediaErrorType)
+        : 'ARITHMETIC_MISMATCH';
+
+    return {
+      hasError: true,
+      errorType,
+      title:
+        aiDetectedError.mediaErrorTitle ||
+        'Media Error Flagged on Uploaded Receipt',
+      description: aiDetectedError.mediaErrorDescription,
+      claimedAmountGbp: grossAmountGbp,
+      suggestedCorrectedAmountGbp: suggestedGbp,
+      claimedOriginalAmount: nativeClaimed,
+      suggestedCorrectedOriginalAmount: suggestedOrig,
+      originalCurrency: currencyLabel,
+      discrepancyGbp,
+      issuerClarificationDraft:
+        aiDetectedError.issuerClarificationDraft ||
+        `Dear ${merchant} Billing Team,\n\nI am writing to request clarification or a corrected tax receipt for document "${sourceDocumentName}" dated ${date} (printed total: ${currencyLabel} ${nativeClaimed.toLocaleString()}).\n\nIssue identified: ${aiDetectedError.mediaErrorDescription}\n\nPlease confirm the accurate breakdown and issue an amended receipt for UK HMRC Self Assessment records (TMA 1970 s.12B).`,
+      resolutionStatus: 'unresolved',
+    };
+  }
+
+  // 2. Deterministic Line-Item Sum vs. Printed Total Check (Native Currency & GBP)
+  if (itemisedLines.length > 0) {
+    const sumNative = Math.round(
+      itemisedLines.reduce(
+        (acc, l) => acc + Number(l.originalAmount ?? l.amountGbp ?? 0),
+        0
+      ) * 100
+    ) / 100;
+    const sumGbp = Math.round(
+      itemisedLines.reduce((acc, l) => acc + Number(l.amountGbp || 0), 0)
+    );
+
+    const nativeDiff = Math.abs(nativeClaimed - sumNative);
+    const gbpDiff = Math.abs(grossAmountGbp - sumGbp);
+
+    // Flag if difference exceeds rounding tolerance (> 2 GBP or > 2% of total)
+    const toleranceNative = Math.max(2, nativeClaimed * 0.015);
+    if (nativeDiff > toleranceNative && gbpDiff >= 2 && sumGbp > 0) {
+      const overUnder =
+        nativeClaimed > sumNative ? 'overstated' : 'understated';
+      const desc = isForeign
+        ? `Itemised receipt lines sum to ${currencyLabel} ${sumNative.toLocaleString()} (£${sumGbp.toLocaleString()} GBP), but the printed receipt total is ${currencyLabel} ${nativeClaimed.toLocaleString()} (£${grossAmountGbp.toLocaleString()} GBP) — ${overUnder} by ${currencyLabel} ${Math.round(nativeDiff).toLocaleString()} (£${gbpDiff.toLocaleString()}).`
+        : `Itemised receipt lines sum to £${sumGbp.toLocaleString()}, but the printed total is £${grossAmountGbp.toLocaleString()} — ${overUnder} by £${gbpDiff.toLocaleString()}.`;
+
+      return {
+        hasError: true,
+        errorType: 'ARITHMETIC_MISMATCH',
+        title: `Receipt Total Mismatch (Lines Sum to £${sumGbp.toLocaleString()} vs Printed £${grossAmountGbp.toLocaleString()})`,
+        description: desc,
+        claimedAmountGbp: grossAmountGbp,
+        suggestedCorrectedAmountGbp: sumGbp,
+        claimedOriginalAmount: nativeClaimed,
+        suggestedCorrectedOriginalAmount: sumNative,
+        originalCurrency: currencyLabel,
+        discrepancyGbp: gbpDiff,
+        issuerClarificationDraft: `Dear ${merchant} Billing Team,\n\nRegarding receipt/invoice "${sourceDocumentName}" (${date}): the individual line items add up to ${currencyLabel} ${sumNative.toLocaleString()} (£${sumGbp.toLocaleString()} GBP), whereas the printed total shows ${currencyLabel} ${nativeClaimed.toLocaleString()} (£${grossAmountGbp.toLocaleString()} GBP).\n\nCould you please clarify this ${currencyLabel} ${Math.round(nativeDiff).toLocaleString()} discrepancy or issue a corrected tax invoice for our HMRC accounting records?`,
+        resolutionStatus: 'unresolved',
+      };
+    }
+
+    // 3. Check for duplicate identical line items on the same receipt (unless explicitly labelled 2x)
+    const seenMap = new Map<string, ItemisedBillLine>();
+    for (const line of itemisedLines) {
+      const normalizedDesc = line.description.trim().toLowerCase();
+      const key = `${normalizedDesc}::${line.originalAmount ?? line.amountGbp}`;
+      if (
+        seenMap.has(key) &&
+        !/\b(2x|x2|second|additional|refill)\b/i.test(normalizedDesc)
+      ) {
+        const dupGbp = Math.round(line.amountGbp);
+        const dupNative = line.originalAmount ?? dupGbp;
+        const correctedGbp = Math.max(1, grossAmountGbp - dupGbp);
+        const correctedNative = Math.max(1, nativeClaimed - dupNative);
+
+        return {
+          hasError: true,
+          errorType: 'DUPLICATE_CHARGE',
+          title: `Possible Duplicate Line Item on Receipt ("${line.description}")`,
+          description: `"${line.description}" (${currencyLabel} ${dupNative.toLocaleString()} / £${dupGbp.toLocaleString()}) appears twice with the same amount on "${sourceDocumentName}".`,
+          claimedAmountGbp: grossAmountGbp,
+          suggestedCorrectedAmountGbp: correctedGbp,
+          claimedOriginalAmount: nativeClaimed,
+          suggestedCorrectedOriginalAmount: correctedNative,
+          originalCurrency: currencyLabel,
+          discrepancyGbp: dupGbp,
+          issuerClarificationDraft: `Dear ${merchant} Billing Team,\n\nOn receipt "${sourceDocumentName}" (${date}), the item "${line.description}" (${currencyLabel} ${dupNative.toLocaleString()}) appears to have been billed twice. Please confirm whether this was a duplicate scan and issue a corrected receipt for ${currencyLabel} ${correctedNative.toLocaleString()}.`,
+          resolutionStatus: 'unresolved',
+        };
+      }
+      seenMap.set(key, line);
+    }
+  }
+
+  // 4. Check for Out-of-Tax-Year or Invalid Dates (UK Tax Year 2025/26 is 6 Apr 2025 – 5 Apr 2026)
+  const combinedText = `${date} ${rawText}`;
+  const outOfBoundsYearMatch = combinedText.match(/\b(202[0-3]|202[7-9]|203\d)\b/);
+  if (outOfBoundsYearMatch) {
+    const badYear = outOfBoundsYearMatch[1];
+    return {
+      hasError: true,
+      errorType: 'DATE_OR_TAX_YEAR_ERROR',
+      title: `Receipt Date Outside 2025/26 Tax Year (${badYear} Detected)`,
+      description: `The date on "${sourceDocumentName}" (${date}) references year ${badYear}, which falls outside the 2025/26 UK Self Assessment period (6 April 2025 – 5 April 2026).`,
+      claimedAmountGbp: grossAmountGbp,
+      suggestedCorrectedAmountGbp: grossAmountGbp,
+      claimedOriginalAmount: nativeClaimed,
+      suggestedCorrectedOriginalAmount: nativeClaimed,
+      originalCurrency: currencyLabel,
+      discrepancyGbp: 0,
+      issuerClarificationDraft: `Dear ${merchant} Billing Team,\n\nReceipt/invoice "${sourceDocumentName}" shows a date in ${badYear} (${date}). Could you please confirm the actual transaction date or reissue the invoice with the correct 2025/26 tax point?`,
+      resolutionStatus: 'unresolved',
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * Applies a user correction to a flagged media error on a single ExpenseItem.
+ */
+export function fixMediaErrorOnSingleItem(
+  item: ExpenseItem,
+  correctedAmountGbp: number,
+  correctedDate?: string,
+  correctionNote?: string
+): ExpenseItem {
+  const cleanGbp = Math.max(1, Math.round(Number(correctedAmountGbp) || item.grossAmount));
+  const fxRate =
+    item.originalCurrency &&
+    item.originalCurrency !== 'GBP' &&
+    item.fxRatePerGbp &&
+    item.fxRatePerGbp > 0
+      ? item.fxRatePerGbp
+      : 1;
+  const newOriginalAmount =
+    item.originalCurrency && item.originalCurrency !== 'GBP'
+      ? Math.round(cleanGbp * fxRate)
+      : cleanGbp;
+
+  // If the item was previously blocked solely due to math tampering, unlock it once fixed
+  const blockMatch = matchCodedBlockList(
+    item.merchantOrDescription,
+    item.rawLineSnippet
+  );
+  const nextStatus: ExpenseStatus = blockMatch
+    ? 'blocked_by_guardrail'
+    : item.businessPercentage === 0
+      ? 'personal'
+      : 'verified';
+
+  return {
+    ...item,
+    grossAmount: cleanGbp,
+    originalAmount: newOriginalAmount,
+    date: correctedDate?.trim() ? correctedDate.trim() : item.date,
+    status: nextStatus,
+    guardrailBlockReason: blockMatch ? item.guardrailBlockReason : undefined,
+    selectedOptionLabel:
+      item.selectedOptionLabel === 'Blocked by Guardrail' ||
+      item.selectedOptionLabel?.includes('Issuer Clarification')
+        ? `${item.businessPercentage}% Work (Corrected £${cleanGbp.toLocaleString()})`
+        : item.selectedOptionLabel,
+    mediaError: item.mediaError
+      ? {
+          ...item.mediaError,
+          resolutionStatus: 'fixed_by_user',
+          resolutionNote:
+            correctionNote?.trim() ||
+            `Corrected to £${cleanGbp.toLocaleString()} GBP by user`,
+        }
+      : undefined,
+  };
+}
+
+export function fixExpenseMediaError(
+  expenses: ExpenseItem[],
+  expenseId: string,
+  correctedAmountGbp: number,
+  correctedDate?: string,
+  correctionNote?: string
+): ExpenseItem[] {
+  return expenses.map((item) =>
+    item.id === expenseId
+      ? fixMediaErrorOnSingleItem(
+          item,
+          correctedAmountGbp,
+          correctedDate,
+          correctionNote
+        )
+      : item
+  );
+}
+
+/**
+ * Marks an item with a media error as "Awaiting Clarification from Issuer",
+ * holding its deductible claim at £0 until resolved.
+ */
+export function markMediaErrorAwaitingIssuerOnSingleItem(
+  item: ExpenseItem,
+  customDraft?: string
+): ExpenseItem {
+  if (!item.mediaError) return item;
+  return {
+    ...item,
+    status: 'needs_clarification',
+    selectedOptionLabel: 'Awaiting Issuer Clarification (£0 Held)',
+    caReviewStatus: 'flagged_extra_attention',
+    caReviewerNote:
+      'Held at £0 pending corrected receipt or billing clarification from issuer.',
+    mediaError: {
+      ...item.mediaError,
+      issuerClarificationDraft:
+        customDraft?.trim() || item.mediaError.issuerClarificationDraft,
+      resolutionStatus: 'awaiting_issuer_clarification',
+      resolutionNote:
+        'Clarification requested from issuer — claim held at £0 until resolved.',
+    },
+  };
+}
+
+export function requestIssuerClarificationOnExpense(
+  expenses: ExpenseItem[],
+  expenseId: string,
+  customDraft?: string
+): ExpenseItem[] {
+  return expenses.map((item) =>
+    item.id === expenseId
+      ? markMediaErrorAwaitingIssuerOnSingleItem(item, customDraft)
+      : item
+  );
+}
+
 

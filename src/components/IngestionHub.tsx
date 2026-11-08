@@ -16,6 +16,11 @@ import {
   Globe,
   ListChecks,
   SlidersHorizontal,
+  Download,
+  AlertTriangle,
+  Wrench,
+  MailQuestion,
+  Copy,
 } from 'lucide-react';
 import {
   DataSourceType,
@@ -24,7 +29,10 @@ import {
   TaxReliefSubsidy,
   applyCustomSplitToItem,
   computeItemisedBillSummary,
+  detectMediaErrorsOnItem,
+  fixMediaErrorOnSingleItem,
   getOrBuildItemisedBillLines,
+  markMediaErrorAwaitingIssuerOnSingleItem,
   resolveExpenseClarification,
   toggleItemisedLineOnSingleItem,
 } from '../utils/taxEngine';
@@ -32,6 +40,7 @@ import {
   RealSourceSlot,
   processRealSourceUpload,
 } from '../utils/realUploadProcessor';
+import { generateSampleSpreadsheetBuffer } from '../utils/spreadsheetParser';
 import { runAdversarialForensics } from '../utils/unseenTestingEngine';
 import {
   CURRENCY_SYMBOLS,
@@ -116,6 +125,18 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
   // Active Upload-Time Work/Split Modal state
   const [activeUploadSession, setActiveUploadSession] =
     useState<ActiveUploadSession | null>(null);
+  const [mediaErrorActionPanel, setMediaErrorActionPanel] = useState<
+    Record<string, 'custom_fix' | 'issuer_clarify' | null>
+  >({});
+  const [customFixAmounts, setCustomFixAmounts] = useState<
+    Record<string, string>
+  >({});
+  const [customFixDates, setCustomFixDates] = useState<Record<string, string>>(
+    {}
+  );
+  const [copiedIssuerDraftId, setCopiedIssuerDraftId] = useState<string | null>(
+    null
+  );
 
   const showSlideUpToast = (message: string) => {
     setRecentUploadFeedback(message);
@@ -190,6 +211,21 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
     }
   };
 
+  const handleDownloadSampleSpreadsheet = (
+    sourceType: DataSourceType,
+    format: 'xlsx' | 'csv'
+  ) => {
+    const sample = generateSampleSpreadsheetBuffer(sourceType, format);
+    const blob = new Blob([sample.data as BlobPart], { type: sample.mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = sample.fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+    showSlideUpToast(`Downloaded "${sample.fileName}" — click Upload File to test it.`);
+  };
+
   const prepareUploadItems = (
     items: ExpenseItem[],
     preferredMode: 'work' | 'split' | 'personal' = 'work'
@@ -202,9 +238,25 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
     const openItemisedBills: Record<string, boolean> = {};
 
     const preparedItems = items.map((rawItem) => {
+      const builtLines = getOrBuildItemisedBillLines(rawItem);
+      const detectedError =
+        rawItem.mediaError ||
+        detectMediaErrorsOnItem({
+          merchant: rawItem.merchantOrDescription,
+          date: rawItem.date,
+          sourceDocumentName: rawItem.sourceDocumentName,
+          grossAmountGbp: rawItem.grossAmount,
+          originalAmount: rawItem.originalAmount,
+          originalCurrency: rawItem.originalCurrency,
+          fxRatePerGbp: rawItem.fxRatePerGbp,
+          rawText: rawItem.rawLineSnippet,
+          itemisedLines: builtLines,
+        });
+
       const itemWithBill: ExpenseItem = {
         ...rawItem,
-        itemisedBillLines: getOrBuildItemisedBillLines(rawItem),
+        itemisedBillLines: builtLines,
+        mediaError: detectedError,
       };
 
       if (itemWithBill.status === 'blocked_by_guardrail') {
@@ -337,6 +389,15 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
       if (item.status === 'blocked_by_guardrail') continue;
       const chosenOptId = session.selectedOptions[item.id];
       if (
+        chosenOptId === 'awaiting_issuer' ||
+        item.mediaError?.resolutionStatus === 'awaiting_issuer_clarification'
+      ) {
+        resolved = resolved.map((curr) =>
+          curr.id === item.id
+            ? markMediaErrorAwaitingIssuerOnSingleItem(curr)
+            : curr
+        );
+      } else if (
         chosenOptId &&
         chosenOptId !== 'custom_split' &&
         chosenOptId !== 'itemised_bill'
@@ -351,6 +412,59 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
       }
     }
     return resolved;
+  };
+
+  const handleFixSessionItemMediaError = (
+    expenseId: string,
+    correctedAmountGbp: number,
+    correctedDate?: string,
+    note?: string
+  ) => {
+    setActiveUploadSession((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        items: prev.items.map((it) =>
+          it.id === expenseId
+            ? fixMediaErrorOnSingleItem(
+                it,
+                correctedAmountGbp,
+                correctedDate,
+                note
+              )
+            : it
+        ),
+      };
+    });
+    setMediaErrorActionPanel((prev) => ({ ...prev, [expenseId]: null }));
+    showSlideUpToast(
+      `Corrected receipt amount to £${Math.round(correctedAmountGbp).toLocaleString()} GBP.`
+    );
+  };
+
+  const handleSeekIssuerClarificationInSession = (
+    expenseId: string,
+    customDraft?: string
+  ) => {
+    setActiveUploadSession((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        selectedOptions: {
+          ...prev.selectedOptions,
+          [expenseId]: 'awaiting_issuer',
+        },
+        items: prev.items.map((it) =>
+          it.id === expenseId
+            ? markMediaErrorAwaitingIssuerOnSingleItem(it, customDraft)
+            : it
+        ),
+      };
+    });
+    setMediaErrorActionPanel((prev) => ({ ...prev, [expenseId]: null }));
+    showSlideUpToast(
+      'Marked as Awaiting Issuer Clarification (£0 held until confirmed).'
+    );
   };
 
   const handleConfirmUploadSession = () => {
@@ -628,7 +742,7 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
               1. Upload Expenses
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Upload a bank statement, receipt, invoice, or mileage log.
+              Upload a bank statement, receipt, invoice, or mileage log (.xlsx, .csv, PDF, or photo).
             </p>
           </div>
 
@@ -779,12 +893,38 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2.5 shrink-0">
+                <div className="flex items-center gap-2 shrink-0">
                   {hasUploaded && (
                     <span className="text-xs font-mono text-slate-400">
-                      {slot.extractedCount} {slot.extractedCount === 1 ? 'item' : 'items'}
+                      {slot.extractedCount}{' '}
+                      {slot.extractedCount === 1 ? 'item' : 'items'}
                     </span>
                   )}
+
+                  <div className="hidden sm:inline-flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDownloadSampleSpreadsheet(slot.source, 'xlsx')
+                      }
+                      title={`Download sample .xlsx for ${slot.title}`}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono font-medium text-slate-500 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors cursor-pointer"
+                    >
+                      <Download className="w-3 h-3" />
+                      .xlsx
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDownloadSampleSpreadsheet(slot.source, 'csv')
+                      }
+                      title={`Download sample .csv for ${slot.title}`}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono font-medium text-slate-500 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors cursor-pointer"
+                    >
+                      <Download className="w-3 h-3" />
+                      .csv
+                    </button>
+                  </div>
 
                   <input
                     ref={(el) => {
@@ -1131,6 +1271,254 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
                               )}
                             </div>
                           </div>
+
+                          {/* Row 1.5: Media Error Flagged Banner (Fix Mistake or Seek Clarification from Issuer) */}
+                          {item.mediaError?.hasError && (
+                            <div
+                              data-testid={`media-error-banner-${item.id}`}
+                              className={`rounded-xl border p-3 space-y-2.5 text-xs ${
+                                item.mediaError.resolutionStatus ===
+                                'fixed_by_user'
+                                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                                  : item.mediaError.resolutionStatus ===
+                                      'awaiting_issuer_clarification'
+                                    ? 'bg-sky-50/80 border-sky-200 text-sky-950'
+                                    : 'bg-amber-50/90 border-amber-300 text-amber-950'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2.5">
+                                <div className="flex items-start gap-2 min-w-0">
+                                  <AlertTriangle
+                                    className={`w-4 h-4 shrink-0 mt-0.5 ${
+                                      item.mediaError.resolutionStatus ===
+                                      'fixed_by_user'
+                                        ? 'text-emerald-700'
+                                        : item.mediaError.resolutionStatus ===
+                                            'awaiting_issuer_clarification'
+                                          ? 'text-sky-700'
+                                          : 'text-amber-700'
+                                    }`}
+                                  />
+                                  <div className="space-y-0.5 min-w-0">
+                                    <div className="font-bold flex flex-wrap items-center gap-1.5">
+                                      <span>{item.mediaError.title}</span>
+                                      {item.mediaError.resolutionStatus ===
+                                        'fixed_by_user' && (
+                                        <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-emerald-200/80 text-emerald-900 rounded">
+                                          FIXED (£{item.grossAmount})
+                                        </span>
+                                      )}
+                                      {item.mediaError.resolutionStatus ===
+                                        'awaiting_issuer_clarification' && (
+                                        <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-sky-200/80 text-sky-900 rounded">
+                                          AWAITING ISSUER (£0 HELD)
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-[11px] leading-relaxed opacity-90">
+                                      {item.mediaError.description}
+                                    </p>
+                                    {item.mediaError.resolutionNote && (
+                                      <p className="text-[11px] font-mono font-semibold mt-1">
+                                        Status: {item.mediaError.resolutionNote}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Action Buttons: Fix Mistake OR Seek Clarification from Issuer */}
+                              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                                {item.mediaError.suggestedCorrectedAmountGbp !==
+                                  item.grossAmount && (
+                                  <button
+                                    type="button"
+                                    data-testid={`fix-media-error-btn-${item.id}`}
+                                    onClick={() =>
+                                      handleFixSessionItemMediaError(
+                                        item.id,
+                                        item.mediaError!
+                                          .suggestedCorrectedAmountGbp,
+                                        undefined,
+                                        `Corrected from £${item.mediaError!.claimedAmountGbp} to verified line-item sum £${item.mediaError!.suggestedCorrectedAmountGbp}`
+                                      )
+                                    }
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer"
+                                  >
+                                    <Wrench className="w-3.5 h-3.5" />
+                                    Fix Mistake (Use £
+                                    {item.mediaError.suggestedCorrectedAmountGbp.toLocaleString()}
+                                    )
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCustomFixAmounts((prev) => ({
+                                      ...prev,
+                                      [item.id]: String(
+                                        item.mediaError
+                                          ?.suggestedCorrectedAmountGbp ||
+                                          item.grossAmount
+                                      ),
+                                    }));
+                                    setCustomFixDates((prev) => ({
+                                      ...prev,
+                                      [item.id]: item.date,
+                                    }));
+                                    setMediaErrorActionPanel((prev) => ({
+                                      ...prev,
+                                      [item.id]:
+                                        prev[item.id] === 'custom_fix'
+                                          ? null
+                                          : 'custom_fix',
+                                    }));
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors cursor-pointer"
+                                >
+                                  <Wrench className="w-3 h-3 text-slate-600" />
+                                  {mediaErrorActionPanel[item.id] ===
+                                  'custom_fix'
+                                    ? 'Hide Manual Fix'
+                                    : 'Edit / Fix Mistake'}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  data-testid={`seek-issuer-clarification-btn-${item.id}`}
+                                  onClick={() =>
+                                    setMediaErrorActionPanel((prev) => ({
+                                      ...prev,
+                                      [item.id]:
+                                        prev[item.id] === 'issuer_clarify'
+                                          ? null
+                                          : 'issuer_clarify',
+                                    }))
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-sky-900 bg-white border border-sky-300 hover:bg-sky-50 rounded-lg transition-colors cursor-pointer"
+                                >
+                                  <MailQuestion className="w-3.5 h-3.5 text-sky-700" />
+                                  Seek Clarification from Issuer
+                                </button>
+                              </div>
+
+                              {/* Inline Panel 1: Manual Fix Mistake Form */}
+                              {mediaErrorActionPanel[item.id] ===
+                                'custom_fix' && (
+                                <div className="p-2.5 bg-white border border-slate-200 rounded-lg flex flex-wrap items-center gap-2">
+                                  <label className="text-[11px] font-semibold text-slate-700">
+                                    Corrected Amount (£ GBP):
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    value={
+                                      customFixAmounts[item.id] ??
+                                      String(
+                                        item.mediaError
+                                          .suggestedCorrectedAmountGbp
+                                      )
+                                    }
+                                    onChange={(e) =>
+                                      setCustomFixAmounts((prev) => ({
+                                        ...prev,
+                                        [item.id]: e.target.value,
+                                      }))
+                                    }
+                                    className="w-24 px-2 py-1 text-xs font-mono font-bold text-slate-900 border border-slate-300 rounded"
+                                  />
+                                  <label className="text-[11px] font-semibold text-slate-700">
+                                    Date:
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={
+                                      customFixDates[item.id] ?? item.date
+                                    }
+                                    onChange={(e) =>
+                                      setCustomFixDates((prev) => ({
+                                        ...prev,
+                                        [item.id]: e.target.value,
+                                      }))
+                                    }
+                                    className="w-24 px-2 py-1 text-xs font-mono text-slate-900 border border-slate-300 rounded"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleFixSessionItemMediaError(
+                                        item.id,
+                                        Number(
+                                          customFixAmounts[item.id] ||
+                                            item.mediaError!
+                                              .suggestedCorrectedAmountGbp
+                                        ),
+                                        customFixDates[item.id] || item.date,
+                                        `Manually corrected by user to £${
+                                          customFixAmounts[item.id] ||
+                                          item.mediaError!
+                                            .suggestedCorrectedAmountGbp
+                                        } (${customFixDates[item.id] || item.date})`
+                                      )
+                                    }
+                                    className="px-3 py-1 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-md cursor-pointer"
+                                  >
+                                    Apply Fix
+                                  </button>
+                                </div>
+                              )}
+
+                              {/* Inline Panel 2: Seek Clarification from Issuer */}
+                              {mediaErrorActionPanel[item.id] ===
+                                'issuer_clarify' && (
+                                <div className="p-3 bg-white border border-sky-200 rounded-lg space-y-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[11px] font-bold text-slate-800">
+                                      Draft Clarification Request to Merchant /
+                                      Issuer:
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        navigator.clipboard?.writeText(
+                                          item.mediaError!
+                                            .issuerClarificationDraft
+                                        );
+                                        setCopiedIssuerDraftId(item.id);
+                                      }}
+                                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded cursor-pointer"
+                                    >
+                                      <Copy className="w-3 h-3" />
+                                      {copiedIssuerDraftId === item.id
+                                        ? 'Copied!'
+                                        : 'Copy Message'}
+                                    </button>
+                                  </div>
+                                  <pre className="p-2 bg-slate-50 border border-slate-200 rounded text-[11px] font-mono whitespace-pre-wrap text-slate-700 leading-relaxed">
+                                    {item.mediaError.issuerClarificationDraft}
+                                  </pre>
+                                  <div className="flex items-center justify-between gap-2 pt-1">
+                                    <span className="text-[11px] text-slate-500">
+                                      Holds deduction at £0 until merchant
+                                      confirms or issues an amended receipt.
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleSeekIssuerClarificationInSession(
+                                          item.id
+                                        )
+                                      }
+                                      className="px-3 py-1.5 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 rounded-lg cursor-pointer shrink-0"
+                                    >
+                                      Hold Claim &amp; Await Issuer Reply (£0)
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
 
                           {/* Row 2: 3 Simple Choice Buttons (or Blocked Notice) */}
                           {isBlocked ? (

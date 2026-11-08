@@ -8,6 +8,10 @@ import {
   Upload,
   ListChecks,
   Sliders,
+  AlertTriangle,
+  Wrench,
+  MailQuestion,
+  Copy,
 } from 'lucide-react';
 import {
   ExpenseItem,
@@ -24,6 +28,16 @@ interface AdvisorClarificationQueueProps {
   onAnswerClarification: (expenseId: string, optionId: string) => void;
   onApplyCustomSplit?: (expenseId: string, customPercentage: number) => void;
   onToggleItemisedBillLine?: (expenseId: string, lineId: string) => void;
+  onFixMediaError?: (
+    expenseId: string,
+    correctedAmountGbp: number,
+    correctedDate?: string,
+    note?: string
+  ) => void;
+  onRequestIssuerClarification?: (
+    expenseId: string,
+    customDraft?: string
+  ) => void;
   onAttachProof: (expenseId: string, fileName: string) => void;
   onReopenClarification: (expenseId: string) => void;
   onInspectTrace: (item: ExpenseItem) => void;
@@ -39,6 +53,8 @@ export const AdvisorClarificationQueue: React.FC<AdvisorClarificationQueueProps>
   onAnswerClarification,
   onApplyCustomSplit,
   onToggleItemisedBillLine,
+  onFixMediaError,
+  onRequestIssuerClarification,
   onAttachProof,
   onInspectTrace,
   onJumpToSources,
@@ -47,12 +63,17 @@ export const AdvisorClarificationQueue: React.FC<AdvisorClarificationQueueProps>
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeUploadIdRef = useRef<string | null>(null);
   const [expandedSplitId, setExpandedSplitId] = useState<string | null>(null);
+  const [openIssuerDraftId, setOpenIssuerDraftId] = useState<string | null>(
+    null
+  );
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const adjustableItems = expenses.filter(
     (e) =>
-      e.status !== 'blocked_by_guardrail' &&
-      e.clarificationOptions &&
-      e.clarificationOptions.length > 0
+      (e.status !== 'blocked_by_guardrail' &&
+        e.clarificationOptions &&
+        e.clarificationOptions.length > 0) ||
+      Boolean(e.mediaError?.hasError)
   );
 
   const blockedItems = expenses.filter((e) => e.status === 'blocked_by_guardrail');
@@ -75,7 +96,7 @@ export const AdvisorClarificationQueue: React.FC<AdvisorClarificationQueueProps>
       <input
         ref={fileInputRef}
         type="file"
-        accept=".pdf,.jpg,.jpeg,.png,.csv"
+        accept=".pdf,.jpg,.jpeg,.png,.csv,.xlsx,.xls"
         onChange={handleFileChange}
         className="hidden"
         aria-label="Upload HMRC proof file"
@@ -232,6 +253,109 @@ export const AdvisorClarificationQueue: React.FC<AdvisorClarificationQueueProps>
                     </button>
                   </div>
                 </div>
+
+                {/* Flagged Media Error Banner in Splits Queue */}
+                {item.mediaError?.hasError && (
+                  <div
+                    className={`rounded-lg border p-3 space-y-2 text-xs ${
+                      item.mediaError.resolutionStatus === 'fixed_by_user'
+                        ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                        : item.mediaError.resolutionStatus ===
+                            'awaiting_issuer_clarification'
+                          ? 'bg-sky-50/80 border-sky-200 text-sky-950'
+                          : 'bg-amber-50/90 border-amber-300 text-amber-950'
+                    }`}
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex items-start gap-2 min-w-0">
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-700" />
+                        <div className="min-w-0">
+                          <div className="font-bold">{item.mediaError.title}</div>
+                          <p className="text-[11px] opacity-90 mt-0.5">
+                            {item.mediaError.description}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                        {onFixMediaError &&
+                          item.mediaError.suggestedCorrectedAmountGbp !==
+                            item.grossAmount && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onFixMediaError(
+                                  item.id,
+                                  item.mediaError!.suggestedCorrectedAmountGbp,
+                                  undefined,
+                                  `Corrected from £${item.mediaError!.claimedAmountGbp} to £${item.mediaError!.suggestedCorrectedAmountGbp}`
+                                )
+                              }
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md cursor-pointer"
+                            >
+                              <Wrench className="w-3 h-3" />
+                              Fix Mistake (£
+                              {item.mediaError.suggestedCorrectedAmountGbp.toLocaleString()}
+                              )
+                            </button>
+                          )}
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOpenIssuerDraftId(
+                              openIssuerDraftId === item.id ? null : item.id
+                            )
+                          }
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-sky-900 bg-white border border-sky-300 hover:bg-sky-50 rounded-md cursor-pointer"
+                        >
+                          <MailQuestion className="w-3 h-3 text-sky-700" />
+                          Seek Clarification from Issuer
+                        </button>
+                      </div>
+                    </div>
+
+                    {openIssuerDraftId === item.id && (
+                      <div className="p-2.5 bg-white border border-sky-200 rounded-md space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-slate-800">
+                            Clarification Request to Merchant / Issuer:
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard?.writeText(
+                                item.mediaError!.issuerClarificationDraft
+                              );
+                              setCopiedId(item.id);
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded cursor-pointer"
+                          >
+                            <Copy className="w-3 h-3" />
+                            {copiedId === item.id ? 'Copied!' : 'Copy Message'}
+                          </button>
+                        </div>
+                        <pre className="p-2 bg-slate-50 border border-slate-200 rounded text-[11px] font-mono whitespace-pre-wrap text-slate-700">
+                          {item.mediaError.issuerClarificationDraft}
+                        </pre>
+                        {onRequestIssuerClarification && (
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onRequestIssuerClarification(item.id);
+                                setOpenIssuerDraftId(null);
+                              }}
+                              className="px-3 py-1 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 rounded-md cursor-pointer"
+                            >
+                              Hold Claim &amp; Await Issuer Reply (£0)
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Expandable Custom % Slider & Clickable Itemised Receipt Checklist */}
                 {isExpanded && (
