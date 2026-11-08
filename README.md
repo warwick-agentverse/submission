@@ -29,8 +29,6 @@ Taximiser pairs regulatory discovery with strict deterministic arithmetic:
     - **Personal Allowance (`£0 – £12,570`)**: `0%`
     - **Basic Rate (`£12,570 – £50,270`)**: `20%` Income Tax + `6%` Class 4 NI = `26%` (`£9,802` full band)
     - **Higher Rate (`Above £50,270`)**: `40%` Income Tax + `2%` Class 4 NI = `42%`
-    - For any taxable profit $P > £50,270$:
-      $$\text{Total Tax \& NI} = \text{round}\big(9802 + (P - 50270) \times 0.42\big)$$
 
 See [`ARCHITECTURE_FLOWCHART.md`](./ARCHITECTURE_FLOWCHART.md) for the full system pipeline diagram.
 
